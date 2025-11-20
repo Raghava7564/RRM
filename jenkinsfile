@@ -1,0 +1,61 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'jiraKey', defaultValue: '', description: 'Jira Issue Key')
+        string(name: 'starSystem', defaultValue: '', description: 'Star System')
+        string(name: 'planet', defaultValue: '', description: 'Planet')
+        string(name: 'branch', defaultValue: '', description: 'Branch Name')
+        string(name: 'requestDate', defaultValue: '', description: 'Requested Deployment Date')
+    }
+
+    stages {
+        stage('Validate Payload') {
+            steps {
+                script {
+                    if (!params.jiraKey || !params.branch) {
+                        error("Missing mandatory fields from Jira request!")
+                    }
+                }
+            }
+        }
+
+        stage('Acknowledge to Jira') {
+            steps {
+                script {
+                    def jiraComment = "Request received by Jenkins for deployment.\\n" +
+                                      "Star System: ${params.starSystem}\\n" +
+                                      "Planet: ${params.planet}\\n" +
+                                      "Branch: ${params.branch}\\n" +
+                                      "Request Date: ${params.requestDate}"
+
+                    sh """
+                    curl -X POST \
+                    -u JENKINSUSER:${JENKINSAPITOKEN} \
+                    -H "Content-Type: application/json" \
+                    --data '{ "body": "${jiraComment}" }' \
+                    https://yourcompany.atlassian.net/rest/api/3/issue/${params.jiraKey}/comment
+                    """
+                }
+            }
+        }
+
+        stage('Call Deployer API - Create Record') {
+            steps {
+                script {
+                    echo "Calling Deployer API with StarSystem: ${params.starSystem}, Planet: ${params.planet}"
+                    // Placeholder - Will be completed during Phase 4
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Jira webhook processed successfully."
+        }
+        failure {
+            echo "Failed to process Jira webhook."
+        }
+    }
+}
