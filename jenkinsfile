@@ -1,61 +1,5482 @@
 pipeline {
+
+  agent any
+
+  options {
+
+    timestamps()
+
+    disableConcurrentBuilds()
+
+  }
+
+  stages {
+
+    /* =========================================================
+
+       VALIDATE PR PAYLOAD
+
+    ========================================================= */
+
+    stage('Validate PR Payload') {
+
+      steps {
+
+        script {
+
+          if (!env.payload_pullRequest_fromRef_repository ||
+
+              !env.payload_pullRequest_fromRef_branchKey ||
+
+              !env.payload_pullRequest_fromRef_latestCommit ||
+
+              !env.payload_pullRequest_link) {
+
+            error '''
+
+Invalid Bitbucket Pull Request payload.
+
+This job supports PR webhook events only.
+
+'''
+
+          }
+
+          env.REPO_NAME = env.payload_pullRequest_fromRef_repository
+
+          env.PR_BRANCH = env.payload_pullRequest_fromRef_branchKey
+
+          env.PR_COMMIT = env.payload_pullRequest_fromRef_latestCommit
+
+          env.PR_URL    = env.payload_pullRequest_link
+
+          echo """
+
+Validated PR Payload
+
+--------------------
+
+Repository : ${env.REPO_NAME}
+
+Branch     : ${env.PR_BRANCH}
+
+Commit     : ${env.PR_COMMIT}
+
+PR URL     : ${env.PR_URL}
+
+"""
+
+        }
+
+      }
+
+    }
+
+    /* =========================================================
+
+       DISPATCH TO APPLICATION PIPELINE
+
+    ========================================================= */
+
+    stage('Dispatch to Application Pipeline') {
+
+      steps {
+
+        script {
+
+          /*
+
+           Repository → Application Pipeline mapping
+
+           -----------------------------------------
+
+           BillingCenter  → GW-PR-BC
+
+           ClaimCenter    → GW-PR-CC
+
+           PolicyCenter   → GW-PR-PC
+
+           ContactManager → GW-PR-CM
+
+          */
+
+          def jobMap = [
+
+            'BillingCenter'  : 'GW-PR-BC',
+
+            'ClaimCenter'    : 'GW-PR-CC',
+
+            'PolicyCenter'   : 'GW-PR-PC',
+
+            'ContactManager' : 'GW-PR-CM'
+
+          ]
+
+          if (!jobMap.containsKey(env.REPO_NAME)) {
+
+            error "No application pipeline configured for repository: ${env.REPO_NAME}"
+
+          }
+
+          echo "Routing PR to pipeline: ${jobMap[env.REPO_NAME]}"
+
+          build(
+
+            job: jobMap[env.REPO_NAME],
+
+            wait: false,
+
+            parameters: [
+
+              string(name: 'PR_REPOSITORY', value: env.REPO_NAME),
+
+              string(name: 'PR_BRANCH',     value: env.PR_BRANCH),
+
+              string(name: 'PR_COMMIT',     value: env.PR_COMMIT),
+
+              string(name: 'PR_URL',        value: env.PR_URL)
+
+            ]
+
+          )
+
+        }
+
+      }
+
+    }
+
+  }
+
+  post {
+
+    failure {
+
+      echo 'Validator pipeline failed – PR was not dispatched.'
+
+    }
+
+  }
+
+}
+ 
+pipeline {
+
+  /* =========================
+ 
+     AGENT
+ 
+     ========================= */
+ 
+  agent { label 'JNA01 || JNA02' }
+
+  /* =========================
+ 
+     PIPELINE OPTIONS
+ 
+     ========================= */
+ 
+  options {
+ 
+    timestamps()
+ 
+    timeout(time: 2, unit: 'HOURS')
+ 
+    disableConcurrentBuilds()
+ 
+  }
+
+  /* =========================
+ 
+     PARAMETERS (FROM BITBUCKET PR)
+ 
+     ========================= */
+ 
+  parameters {
+ 
+    string(name: 'PR_REPOSITORY')
+ 
+    string(name: 'PR_BRANCH')
+ 
+    string(name: 'PR_COMMIT')
+ 
+    string(name: 'PR_URL')
+ 
+  }
+
+  /* =========================
+ 
+     ENVIRONMENT
+ 
+     ========================= */
+ 
+  environment {
+ 
+    APP_NAME  = 'BillingCenter'
+ 
+    REPO_SLUG = 'billingcenter'
+ 
+    CICD_APP  = 'BC'
+
+    BITBUCKET_BASE_URL = 'https://bitbucket.redrivrca.alpha3-butterfly.guidewire.net'
+ 
+    BITBUCKET_CREDS_ID = 'Jenkins-GW-API-Token'
+
+    CICD_BASE_URL     = 'https://cicd-manager-service.api.omega2-andromeda.guidewire.net'
+ 
+    CICD_TENANT       = 'redrivrca'
+ 
+    CICD_STAR_SYSTEM  = 'gwcp'
+ 
+    CICD_QUALITY_GATE = 'prqualitygate'
+
+    OKTA_TOKEN_URL = 'https://guidewire-hub.okta.com/oauth2/aus11vix3uKEpIfSI357/v1/token'
+
+    STORAGE_ACCOUNT   = 'azrd0st0jnk1'
+ 
+    STORAGE_CONTAINER = 'jnk-data01'
+ 
+    AZURE_KV_URL      = 'https://AZRD-KV-DVO1.vault.azure.net'
+ 
+    AZURE_KV_SECRET   = 'JenkinsStorageAccount1'
+ 
+  }
+
+  /* =========================
+ 
+     STAGES
+ 
+     ========================= */
+ 
+  stages {
+
+    /* ---------- Prepare Context ---------- */
+ 
+    stage('Prepare Context') {
+ 
+      steps {
+ 
+        script {
+ 
+          env.CLEAN_BRANCH = params.PR_BRANCH.replaceFirst(/^refs\/heads\//, '')
+ 
+          env.REPO_URL     = "${env.BITBUCKET_BASE_URL}/scm/gwcpdev/${env.REPO_SLUG}.git"
+ 
+          env.REPORT_DIR   = "reports/${env.APP_NAME}/PR-${params.PR_COMMIT}"
+
+          echo """
+ 
+Application Context
+ 
+-------------------
+ 
+Application : ${env.APP_NAME}
+ 
+Repository  : ${params.PR_REPOSITORY}
+ 
+Branch      : ${env.CLEAN_BRANCH}
+ 
+Commit      : ${params.PR_COMMIT}
+ 
+"""
+ 
+        }
+ 
+      }
+ 
+    }
+
+    /* ---------- Checkout Source ---------- */
+ 
+    stage('Checkout Source') {
+
+  steps {
+
+    deleteDir()
+
+    checkout([
+
+      $class: 'GitSCM',
+
+      branches: [[
+
+        name: "refs/heads/${env.CLEAN_BRANCH}"
+
+      ]],
+
+      userRemoteConfigs: [[
+
+        credentialsId: env.BITBUCKET_CREDS_ID,
+
+        url: env.REPO_URL,
+
+        refspec: "+refs/heads/${env.CLEAN_BRANCH}:refs/remotes/origin/${env.CLEAN_BRANCH}"
+
+      ]],
+
+      extensions: [
+
+        [$class: 'CloneOption',
+
+          shallow: true,
+
+          depth: 1,
+
+          noTags: true,
+
+          honorRefspec: true
+
+        ]
+
+      ]
+
+    ])
+
+  }
+
+}
+
+ 
+  /* ---------- Security Scans (Parallel) ---------- */
+ 
+    stage('Security Scans') {
+
+      steps {
+
+        script {
+
+          bat "mkdir \"${env.REPORT_DIR}\" 2>NUL"
+
+          parallel(
+
+            Semgrep: {
+
+              bat '''
+
+chcp 65001 >NUL
+
+set PYTHONUTF8=1
+
+set PYTHONIOENCODING=utf-8
+
+semgrep scan --config=auto --json ^
+
+  -o "%REPORT_DIR%\\semgrep-report.json" . || exit /b 0
+
+'''
+
+            },
+
+            Trivy: {
+
+              bat '''
+
+trivy fs . ^
+
+  --scanners vuln,misconfig ^
+
+  --timeout 15m ^
+
+  --severity CRITICAL,HIGH ^
+
+  --format json ^
+
+  --output "%REPORT_DIR%\\trivy-report.json" || exit /b 0
+
+'''
+
+            },
+
+            Gitleaks: {
+
+              bat '''
+
+gitleaks detect --no-git --source . ^
+
+  --report-format json ^
+
+  --report-path "%REPORT_DIR%\\gitleaks-report.json" || exit /b 0
+
+'''
+
+            }
+
+          )
+
+        }
+
+      }
+
+    }
+
+    /* ---------- Generate HTML Reports ---------- */
+ 
+    stage('Generate HTML Reports') {
+
+            steps {
+
+                // IMPORTANT: use triple single quotes to avoid Groovy interpolating $variables in PowerShell
+
+                powershell '''
+
+                #region Helpers
+
+                Add-Type -AssemblyName System.Web
+ 
+                function HtmlEncode($text) {
+
+                    if ($null -eq $text) { return "" }
+
+                    return [System.Web.HttpUtility]::HtmlEncode([string]$text)
+
+                }
+ 
+                function Write-Table($headers, $rowsHtml, $title) {
+
+                    $headCells = ($headers | ForEach-Object { "<th>{0}</th>" -f (HtmlEncode $_) }) -join ""
+
+                    $style = @"
+<style>
+
+                          body { font-family: Segoe UI, Arial, sans-serif; margin: 16px; }
+
+                          h2 { margin-top: 24px; }
+
+                          table { border-collapse: collapse; width: 100%; }
+
+                          th, td { border: 1px solid #ddd; padding: 6px 8px; vertical-align: top; }
+
+                          th { background: #f5f5f5; }
+
+                          .sev-CRITICAL { background:#ffefef; }
+
+                          .sev-HIGH { background:#fff3f0; }
+
+                          .sev-MEDIUM { background:#fffaf0; }
+
+                          .sev-LOW { background:#f7fff7; }
+
+                          .muted { color: #666; }
+
+                          pre { white-space: pre-wrap; word-wrap: break-word; }
+</style>
+
+"@
+
+                    $html = @"
+<html>
+<head>
+<meta charset="utf-8">
+<title>$title</title>
+
+  $style
+</head>
+<body>
+<h2>$title</h2>
+<table>
+<tr>$headCells</tr>
+
+    $rowsHtml
+</table>
+</body>
+</html>
+
+"@
+
+                    return $html
+
+                }
+ 
+                function Ensure-Dir($path) {
+
+                    if (!(Test-Path $path)) {
+
+                        New-Item -ItemType Directory -Path $path | Out-Null
+
+                    }
+
+                }
+
+                #endregion
+ 
+                $ErrorActionPreference = "Stop"
+
+                $reportDir = "$env:REPORT_DIR"
+
+                Ensure-Dir $reportDir
+ 
+                # --- Semgrep HTML ---
+
+                try {
+
+                    $semgrepJsonPath = Join-Path $reportDir "semgrep-report.json"
+
+                    if (Test-Path $semgrepJsonPath) {
+
+                        $sem = Get-Content $semgrepJsonPath -Raw | ConvertFrom-Json
+
+                        $results = @()
+
+                        if ($sem -and ($sem.PSObject.Properties.Name -contains 'results') -and $sem.results) {
+
+                            $results = $sem.results
+
+                        }
+ 
+                        $rows = @()
+
+                        $crit=0;$high=0;$med=0;$low=0
+ 
+                        foreach ($r in $results) {
+
+                            $rule     = $r.check_id
+
+                            $sev      = $r.extra.severity
+
+                            $file     = $r.path
+
+                            $line     = $r.start.line
+
+                            $msg      = $r.extra.message
+
+                            $meta     = if ($r.extra.metadata) { $r.extra.metadata | ConvertTo-Json -Compress } else { "" }
+
+                            $fix      = $r.extra.fix
+ 
+                            switch ($sev) {
+
+                                "CRITICAL" { $crit++ }
+
+                                "HIGH"     { $high++ }
+
+                                "MEDIUM"   { $med++ }
+
+                                "LOW"      { $low++ }
+
+                            }
+ 
+                            $cls = "sev-$sev"
+
+                            $rows += "<tr class=""$cls""><td>{0}</td><td>{1}</td><td>{2}</td><td class=""muted"">{3}</td><td>{4}</td><td class=""muted"">{5}</td></tr>" -f `
+
+                                (HtmlEncode $rule), (HtmlEncode $sev), (HtmlEncode $file), (HtmlEncode $line), (HtmlEncode $msg), (HtmlEncode $meta)
+ 
+                            if ($fix) {
+
+                                $rows += "<tr class=""$cls""><td colspan=""6""><strong>Fix:</strong><br><pre>{0}</pre></td></tr>" -f (HtmlEncode $fix)
+
+                            }
+
+                        }
+ 
+                        $summary = "<p><strong>Total:</strong> $($results.Count) &nbsp; | &nbsp; <strong>Critical:</strong> $crit &nbsp; <strong>High:</strong> $high &nbsp; <strong>Medium:</strong> $med &nbsp; <strong>Low:</strong> $low</p>"
+
+                        $rowsHtml = $summary + ($rows -join "`n")
+
+                        $headers = @("Rule", "Severity", "File", "Line", "Message", "Metadata")
+
+                        $html = Write-Table $headers $rowsHtml "Semgrep Findings"
+
+                        Set-Content (Join-Path $reportDir "semgrep-report.html") -Value $html -Encoding UTF8
+
+                    }
+
+                } catch {
+
+                    Write-Host "Semgrep HTML generation failed: $($_.Exception.Message)"
+
+                }
+ 
+                # --- Trivy HTML ---
+
+                try {
+
+                    $trivyJsonPath = Join-Path $reportDir "trivy-report.json"
+
+                    if (Test-Path $trivyJsonPath) {
+
+                        $trivy = Get-Content $trivyJsonPath -Raw | ConvertFrom-Json
+
+                        $rows = @()
+
+                        $crit=0;$high=0;$med=0;$low=0
+
+                        $total=0
+ 
+                        if ($trivy -and $trivy.Results) {
+
+                            foreach ($result in $trivy.Results) {
+
+                                if ($null -ne $result.Vulnerabilities) {
+
+                                    foreach ($v in $result.Vulnerabilities) {
+
+                                        $total++
+
+                                        $sev = $v.Severity
+
+                                        switch ($sev) {
+
+                                            "CRITICAL" { $crit++ }
+
+                                            "HIGH"     { $high++ }
+
+                                            "MEDIUM"   { $med++ }
+
+                                            "LOW"      { $low++ }
+
+                                        }
+
+                                        $rows += "<tr class=""sev-$sev""><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td class=""muted"">{4}</td><td class=""muted"">{5}</td><td class=""muted"">{6}</td></tr>" -f `
+
+                                            (HtmlEncode $result.Target),
+
+                                            (HtmlEncode $v.VulnerabilityID),
+
+                                            (HtmlEncode $v.PkgName),
+
+                                            (HtmlEncode $sev),
+
+                                            (HtmlEncode $v.InstalledVersion),
+
+                                            (HtmlEncode $v.FixedVersion),
+
+                                            (HtmlEncode $v.Title)
+
+                                        if ($v.Description) {
+
+                                            $rows += "<tr class=""sev-$sev""><td colspan=""7""><strong>Description:</strong><br><pre>{0}</pre></td></tr>" -f (HtmlEncode $v.Description)
+
+                                        }
+
+                                        if ($v.References) {
+
+                                            $refs = ($v.References | ForEach-Object { "<li>{0}</li>" -f (HtmlEncode $_) }) -join ""
+
+                                            $rows += "<tr class=""sev-$sev""><td colspan=""7""><strong>References:</strong><ul>$refs</ul></td></tr>"
+
+                                        }
+
+                                    }
+
+                                }
+
+                            }
+
+                        }
+
+ 
+
+
+                        $summary = "<p><strong>Total:</strong> $total &nbsp; | &nbsp; <strong>Critical:</strong> $crit &nbsp; <strong>High:</strong> $high &nbsp; <strong>Medium:</strong> $med &nbsp; <strong>Low:</strong> $low</p>"
+
+                        $rowsHtml = $summary + ($rows -join "`n")
+
+                        $headers = @("Target", "Vulnerability ID", "Package", "Severity", "Installed", "Fixed", "Title")
+
+                        $html = Write-Table $headers $rowsHtml "Trivy Vulnerabilities"
+
+                        Set-Content (Join-Path $reportDir "trivy-report.html") -Value $html -Encoding UTF8
+
+                    }
+
+                } catch {
+
+                    Write-Host "Trivy HTML generation failed: $($_.Exception.Message)"
+
+                }
+ 
+                # --- Gitleaks HTML ---
+
+                try {
+
+                    $glJsonPath = Join-Path $reportDir "gitleaks-report.json"
+
+                    if (Test-Path $glJsonPath) {
+
+                        $gl = Get-Content $glJsonPath -Raw | ConvertFrom-Json
+
+                        # Support both formats: object with `leaks` or raw array
+
+                        if ($gl -is [System.Collections.IEnumerable] -and -not ($gl.PSObject.Properties.Name -contains 'leaks')) {
+
+                            $leaks = $gl
+
+                        } else {
+
+                            $leaks = $gl.leaks
+
+                        }
+
+                        if (-not $leaks) { $leaks = @() }
+ 
+                        $rows = @()
+
+                        $count = 0
+
+                        foreach ($r in $leaks) {
+
+                            $count++
+
+                            $desc  = $r.Description
+
+                            $file  = $r.File
+
+                            $line  = $r.StartLine
+
+                            $rule  = $r.RuleID
+
+                            $repo  = $r.Repo
+
+                            $match = $r.Match
+
+                            $author= $r.Author
+
+                            $commit= $r.Commit
+
+                            $date  = $r.Date
+
+                            $rows += "<tr><td>{0}</td><td>{1}</td><td class=""muted"">{2}</td><td>{3}</td><td class=""muted"">{4}</td></tr>" -f `
+
+                                (HtmlEncode $desc), (HtmlEncode $file), (HtmlEncode $line), (HtmlEncode $rule), (HtmlEncode $repo)
+
+                            if ($match) {
+
+                                $rows += "<tr><td colspan=""5""><strong>Matched String (redacted):</strong><br><pre>{0}</pre></td></tr>" -f (HtmlEncode $match)
+
+                            }
+
+                            if ($commit -or $author -or $date) {
+
+                                $rows += "<tr><td colspan=""5""><strong>Git:</strong> Commit={0} &nbsp; Author={1} &nbsp; Date={2}</td></tr>" -f `
+
+                                    (HtmlEncode $commit), (HtmlEncode $author), (HtmlEncode $date)
+
+                            }
+
+                        }
+
+                        $summary = "<p><strong>Total Findings:</strong> $count</p>"
+
+                        $rowsHtml = $summary + ($rows -join "`n")
+
+                        $headers = @("Description", "File", "Line", "Rule", "Repo")
+
+                        $html = Write-Table $headers $rowsHtml "Gitleaks Findings"
+
+                        Set-Content (Join-Path $reportDir "gitleaks-report.html") -Value $html -Encoding UTF8
+
+                    }
+
+                } catch {
+
+                    Write-Host "Gitleaks HTML generation failed: $($_.Exception.Message)"
+
+                }
+
+                '''
+
+            }
+
+        }
+
+    /* ---------- Publish Reports ---------- */
+ 
+    stage('Publish Reports') {
+ 
+      steps {
+ 
+        publishHTML([
+ 
+          reportDir: env.REPORT_DIR,
+ 
+          reportFiles: '*.html',
+ 
+          reportName: 'Security Scan Reports',
+ 
+          keepAll: true,
+ 
+          alwaysLinkToLastBuild: true,
+ 
+          allowMissing: true
+ 
+        ])
+ 
+      }
+ 
+    }
+
+    /* ---------- Upload Reports to Azure ---------- */
+ 
+    stage('Upload Reports to Azure Blob Storage') {
+
+  steps {
+
+    withAzureKeyvault(
+
+      azureKeyVaultSecrets: [[
+
+        secretType: 'Secret',
+
+        name: env.AZURE_KV_SECRET,
+
+        envVariable: 'AZURE_STORAGE_KEY'
+
+      ]],
+
+      keyVaultURLOverride: env.AZURE_KV_URL
+
+    ) {
+
+      powershell '''
+
+Write-Host "Uploading reports to Azure Blob Storage..."
+
+az storage blob upload-batch `
+
+  --account-name $env:STORAGE_ACCOUNT `
+
+  --account-key  $env:AZURE_STORAGE_KEY `
+
+  --destination "$($env:STORAGE_CONTAINER)/$($env:APP_NAME)/PR-$($env:PR_COMMIT)" `
+
+  --source "$($env:REPORT_DIR)" `
+
+  --overwrite
+
+'''
+
+    }
+
+  }
+
+}
+ 
+stage('Aggregate Findings') {
+
+  steps {
+ 
+    script {
+
+      def reportDir = "${env.WORKSPACE}\\${env.REPORT_DIR}".replace('/', '\\')
+
+      int semgrepCritical = 0
+ 
+      int semgrepHigh     = 0
+ 
+      int semgrepMedium   = 0
+ 
+      int semgrepLow      = 0
+
+      int trivyCritical   = 0
+ 
+      int trivyHigh       = 0
+ 
+      int gitleaksCount   = 0
+
+      /* ---------- SEMGREP (FIXED MAPPING) ---------- */
+ 
+      if (fileExists("${reportDir}\\semgrep-report.json")) {
+ 
+        def sem = readJSON file: "${reportDir}\\semgrep-report.json"
+
+        sem?.results?.each { r ->
+ 
+          def sev = (
+ 
+            r?.extra?.severity ?:
+ 
+            r?.severity ?:
+ 
+            r?.extra?.metadata?.severity
+ 
+          )?.toString()?.toUpperCase()
+
+          switch (sev) {
+ 
+            case 'CRITICAL':
+ 
+              semgrepCritical++
+ 
+              break
+ 
+            case 'HIGH':
+ 
+            case 'ERROR':
+ 
+              semgrepHigh++
+ 
+              break
+ 
+            case 'MEDIUM':
+ 
+            case 'WARNING':
+ 
+              semgrepMedium++
+ 
+              break
+ 
+            case 'LOW':
+ 
+            case 'INFO':
+ 
+              semgrepLow++
+ 
+              break
+ 
+          }
+ 
+        }
+ 
+      }
+
+      /* ---------- TRIVY ---------- */
+ 
+      if (fileExists("${reportDir}\\trivy-report.json")) {
+ 
+        def trivy = readJSON file: "${reportDir}\\trivy-report.json"
+ 
+        def results = trivy?.Results ?: trivy?.results ?: []
+
+        results.each { r ->
+ 
+          r?.Vulnerabilities?.each { v ->
+ 
+            def sev = v?.Severity?.toString()?.toUpperCase()
+ 
+            if (sev == 'CRITICAL') trivyCritical++
+ 
+            if (sev == 'HIGH')     trivyHigh++
+ 
+          }
+ 
+        }
+ 
+      }
+
+      /* ---------- GITLEAKS ---------- */
+ 
+      if (fileExists("${reportDir}\\gitleaks-report.json")) {
+ 
+        def gl = readJSON file: "${reportDir}\\gitleaks-report.json"
+ 
+        gitleaksCount = gl?.leaks?.size() ?: (gl?.size() ?: 0)
+ 
+      }
+
+      /* ---------- EXPORT ---------- */
+ 
+      env.SEMGREP_CRITICAL = semgrepCritical.toString()
+ 
+      env.SEMGREP_HIGH     = semgrepHigh.toString()
+ 
+      env.SEMGREP_MEDIUM   = semgrepMedium.toString()
+ 
+      env.SEMGREP_LOW      = semgrepLow.toString()
+
+      env.TRIVY_CRITICAL   = trivyCritical.toString()
+ 
+      env.TRIVY_HIGH       = trivyHigh.toString()
+
+      env.GITLEAKS_COUNT   = gitleaksCount.toString()
+
+      env.TOTAL_FINDINGS = (
+ 
+        semgrepCritical + semgrepHigh + semgrepMedium + semgrepLow +
+ 
+        trivyCritical + trivyHigh +
+ 
+        gitleaksCount
+ 
+      ).toString()
+
+      echo "Security Summary:"
+ 
+      echo "Semgrep C=${env.SEMGREP_CRITICAL}, H=${env.SEMGREP_HIGH}, M=${env.SEMGREP_MEDIUM}, L=${env.SEMGREP_LOW}"
+ 
+      echo "Trivy   C=${env.TRIVY_CRITICAL}, H=${env.TRIVY_HIGH}"
+ 
+      echo "Gitleaks=${env.GITLEAKS_COUNT}"
+ 
+      echo "TOTAL_FINDINGS=${env.TOTAL_FINDINGS}"
+ 
+    }
+ 
+  }
+ 
+}
+
+    stage('Security Quality Gate') {
+ 
+  steps {
+ 
+    script {
+ 
+      if (env.TOTAL_FINDINGS.toInteger() > 0) {
+ 
+        echo "SECURITY QUALITY GATE PASSED (Happy Path)"
+ 
+        echo "Findings detected but allowed as per CC policy: ${env.TOTAL_FINDINGS}"
+
+        // DO NOT fail the build in CC
+ 
+        currentBuild.result = 'SUCCESS'
+ 
+        env.SECURITY_GATE_FAILED = 'false'
+ 
+      } else {
+ 
+        echo "SECURITY QUALITY GATE PASSED – No findings"
+ 
+        env.SECURITY_GATE_FAILED = 'false'
+ 
+      }
+ 
+    }
+ 
+  }
+ 
+}
+ 
+ 
+    /* ---------- Get Okta Access Token ---------- */
+
+    stage('Get Okta Access Token') {
+ 
+      steps {
+ 
+        withCredentials([
+ 
+          string(credentialsId: 'OKTA_CLIENT_ID', variable: 'OKTA_CLIENT_ID'),
+ 
+          string(credentialsId: 'OKTA_CLIENT_SECRET', variable: 'OKTA_CLIENT_SECRET')
+ 
+        ]) {
+ 
+          script {
+ 
+            def tokenResp = httpRequest(
+ 
+              httpMode: 'POST',
+ 
+              url: env.OKTA_TOKEN_URL,
+ 
+              contentType: 'APPLICATION_FORM',
+ 
+              requestBody:
+ 
+                "grant_type=client_credentials&" +
+ 
+                "scope=cicd.qualitygates.read cicd.qualitygates.write " +
+ 
+                "tenant.${env.CICD_TENANT} project.${env.CICD_STAR_SYSTEM}&" +
+ 
+                "client_id=${OKTA_CLIENT_ID}&client_secret=${OKTA_CLIENT_SECRET}"
+ 
+            )
+ 
+            env.CICD_TOKEN = readJSON(text: tokenResp.content).access_token
+ 
+          }
+ 
+        }
+ 
+      }
+ 
+    }
+
+ 
+/* ---------- Close Guidewire Quality Gate ---------- */
+ 
+    stage('Close Guidewire Quality Gate') {
+ 
+  steps {
+ 
+    script {
+ 
+      echo "Closing Guidewire Quality Gate for CC (Happy Path)"
+
+      retry(3) {
+ 
+        httpRequest(
+ 
+          httpMode: 'POST',
+ 
+          url: "${env.CICD_BASE_URL}/api/v3/tenants/${env.CICD_TENANT}" +
+ 
+               "/starsystems/${env.CICD_STAR_SYSTEM}" +
+ 
+               "/applications/${env.CICD_APP}" +
+ 
+               "/quality-gates/${env.CICD_QUALITY_GATE}/verifications",
+ 
+          contentType: 'APPLICATION_JSON',
+ 
+          customHeaders: [[
+ 
+            name: 'Authorization',
+ 
+            value: "Bearer ${env.CICD_TOKEN}",
+ 
+            maskValue: true
+ 
+          ]],
+ 
+          requestBody: """
+ 
+{
+ 
+  "artifact": { "type": "COMMIT", "id": "${params.PR_COMMIT}" },
+ 
+  "status": "SUCCESSFUL",
+ 
+  "url": "${params.PR_URL}",
+ 
+  "comment": "Security scans completed – findings accepted as per CC policy"
+ 
+}
+ 
+"""
+ 
+        )
+ 
+      }
+ 
+    }
+ 
+  }
+ 
+}
+ 
+ 
+    stage('Finalize Build Status') {
+ 
+      steps {
+ 
+        script {
+ 
+          if (env.SECURITY_GATE_FAILED == 'true') {
+ 
+            error("Pipeline failed due to security findings")
+ 
+          }
+ 
+        }
+ 
+      }
+ 
+    }
+ 
+  }
+ 
+  /* =========================
+ 
+     POST ACTIONS (EMAIL)
+ 
+    ========================= */
+
+  post {
+ 
+  always {
+ 
+    script {
+ 
+      withCredentials([
+ 
+        string(credentialsId: 'NOTIFICATION_EMAILS', variable: 'NOTIFICATION_EMAILS')
+ 
+      ]) {
+ 
+        if (!env.NOTIFICATION_EMAILS?.trim()) {
+ 
+          echo "NOTIFICATION_EMAILS credential is empty. Skipping email."
+ 
+          return
+ 
+        }
+
+        def ok = currentBuild.currentResult == 'SUCCESS'
+
+        emailext(
+ 
+          subject: "PR Security Scan ${ok ? 'SUCCESS' : 'FAILURE'}: ${env.APP_NAME} #${env.BUILD_NUMBER}",
+ 
+          mimeType: 'text/html',
+ 
+          to: env.NOTIFICATION_EMAILS,
+ 
+          body: """<html><body>
+<h3 style="color:${ok ? 'green' : 'red'};">
+ 
+${ok ? 'All security scans completed successfully.' : 'Security scan failures detected.'}
+</h3>
+<p><b>Scan Summary:</b></p>
+<ul>
+<li>Semgrep – Critical: ${env.SEMGREP_CRITICAL},
+ 
+    High: ${env.SEMGREP_HIGH},
+ 
+    Medium: ${env.SEMGREP_MEDIUM},
+ 
+    Low: ${env.SEMGREP_LOW}</li>
+<li>Trivy – Critical: ${env.TRIVY_CRITICAL},
+ 
+    High: ${env.TRIVY_HIGH}</li>
+<li>Gitleaks – Secrets detected: ${env.GITLEAKS_COUNT}</li>
+</ul>
+<hr>
+<h2 style="color:${ok ? 'green' : 'red'};">Jenkins Build Details</h2>
+<table border="1" cellpadding="5">
+<tr><th>Name</th><th>Value</th></tr>
+<tr><td>Build Number</td><td>${env.BUILD_NUMBER}</td></tr>
+<tr><td>Job Name</td><td>${env.JOB_NAME}</td></tr>
+<tr>
+<td>Build Status</td>
+<td style="color:${ok ? 'green' : 'red'};"><b>${currentBuild.currentResult}</b></td>
+</tr>
+<tr>
+<td>Build URL</td>
+<td><a href="${env.BUILD_URL}" target="_blank">Open Jenkins Build</a></td>
+</tr>
+<tr><td>Branch</td><td>${env.CLEAN_BRANCH}</td></tr>
+<tr>
+<td>Console</td>
+<td><a href="${env.BUILD_URL}console" target="_blank">View Console Logs</a></td>
+</tr>
+<tr>
+<td>Pull Request</td>
+<td><a href="${params.PR_URL}" target="_blank">Open Pull Request</a></td>
+</tr>
+</table>
+</body></html>"""
+ 
+        )
+ 
+      }
+ 
+    }
+ 
+  }
+ 
+}
+ 
+}
+
+ 
+pipeline {
+
+  /* =========================
+ 
+     AGENT
+ 
+     ========================= */
+ 
+  agent { label 'JNA01 || JNA02' }
+
+  /* =========================
+ 
+     PIPELINE OPTIONS
+ 
+     ========================= */
+ 
+  options {
+ 
+    timestamps()
+ 
+    timeout(time: 2, unit: 'HOURS')
+ 
+    disableConcurrentBuilds()
+ 
+  }
+
+  /* =========================
+ 
+     PARAMETERS (FROM BITBUCKET PR)
+ 
+     ========================= */
+ 
+  parameters {
+ 
+    string(name: 'PR_REPOSITORY')
+ 
+    string(name: 'PR_BRANCH')
+ 
+    string(name: 'PR_COMMIT')
+ 
+    string(name: 'PR_URL')
+ 
+  }
+
+  /* =========================
+ 
+     ENVIRONMENT
+ 
+     ========================= */
+ 
+  environment {
+ 
+    APP_NAME  = 'ContactManager'
+ 
+    REPO_SLUG = 'contactmanager'
+ 
+    CICD_APP  = 'CM'
+
+    BITBUCKET_BASE_URL = 'https://bitbucket.redrivrca.alpha3-butterfly.guidewire.net'
+ 
+    BITBUCKET_CREDS_ID = 'Jenkins-GW-API-Token'
+
+    CICD_BASE_URL     = 'https://cicd-manager-service.api.omega2-andromeda.guidewire.net'
+ 
+    CICD_TENANT       = 'redrivrca'
+ 
+    CICD_STAR_SYSTEM  = 'gwcp'
+ 
+    CICD_QUALITY_GATE = 'prqualitygate'
+
+    OKTA_TOKEN_URL = 'https://guidewire-hub.okta.com/oauth2/aus11vix3uKEpIfSI357/v1/token'
+
+    STORAGE_ACCOUNT   = 'azrd0st0jnk1'
+ 
+    STORAGE_CONTAINER = 'jnk-data01'
+ 
+    AZURE_KV_URL      = 'https://AZRD-KV-DVO1.vault.azure.net'
+ 
+    AZURE_KV_SECRET   = 'JenkinsStorageAccount1'
+ 
+  }
+
+  /* =========================
+ 
+     STAGES
+ 
+     ========================= */
+ 
+  stages {
+
+    /* ---------- Prepare Context ---------- */
+ 
+    stage('Prepare Context') {
+ 
+      steps {
+ 
+        script {
+ 
+          env.CLEAN_BRANCH = params.PR_BRANCH.replaceFirst(/^refs\/heads\//, '')
+ 
+          env.REPO_URL     = "${env.BITBUCKET_BASE_URL}/scm/gwcpdev/${env.REPO_SLUG}.git"
+ 
+          env.REPORT_DIR   = "reports/${env.APP_NAME}/PR-${params.PR_COMMIT}"
+
+          echo """
+ 
+Application Context
+ 
+-------------------
+ 
+Application : ${env.APP_NAME}
+ 
+Repository  : ${params.PR_REPOSITORY}
+ 
+Branch      : ${env.CLEAN_BRANCH}
+ 
+Commit      : ${params.PR_COMMIT}
+ 
+"""
+ 
+        }
+ 
+      }
+ 
+    }
+
+    /* ---------- Checkout Source ---------- */
+ 
+    stage('Checkout Source') {
+
+  steps {
+
+    deleteDir()
+
+    checkout([
+
+      $class: 'GitSCM',
+
+      branches: [[
+
+        name: "refs/heads/${env.CLEAN_BRANCH}"
+
+      ]],
+
+      userRemoteConfigs: [[
+
+        credentialsId: env.BITBUCKET_CREDS_ID,
+
+        url: env.REPO_URL,
+
+        refspec: "+refs/heads/${env.CLEAN_BRANCH}:refs/remotes/origin/${env.CLEAN_BRANCH}"
+
+      ]],
+
+      extensions: [
+
+        [$class: 'CloneOption',
+
+          shallow: true,
+
+          depth: 1,
+
+          noTags: true,
+
+          honorRefspec: true
+
+        ]
+
+      ]
+
+    ])
+
+  }
+
+}
+
+ 
+/* ---------- Security Scans (Parallel) ---------- */
+ 
+    stage('Security Scans') {
+
+      steps {
+
+        script {
+
+          bat "mkdir \"${env.REPORT_DIR}\" 2>NUL"
+
+          parallel(
+
+            Semgrep: {
+
+              bat '''
+
+chcp 65001 >NUL
+
+set PYTHONUTF8=1
+
+set PYTHONIOENCODING=utf-8
+
+semgrep scan --config=auto --json ^
+
+  -o "%REPORT_DIR%\\semgrep-report.json" . || exit 0
+
+'''
+
+            },
+
+           Trivy: {
+
+  bat '''
+
+    chcp 65001 >NUL
+
+    if not exist "%REPORT_DIR%" mkdir "%REPORT_DIR%"
+
+    trivy fs . ^
+
+      --scanners vuln,secret,misconfig,license ^
+
+      --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL ^
+
+      --timeout 15m ^
+
+      --format json ^
+
+      --output "%REPORT_DIR%\\trivy-report.json" || exit 0
+
+  '''
+
+},
+
+            Gitleaks: {
+
+              bat '''
+
+gitleaks detect --no-git --source . ^
+
+  --report-format json ^
+
+  --report-path "%REPORT_DIR%\\gitleaks-report.json" || exit 0
+
+'''
+
+            }
+
+          )
+
+        }
+
+      }
+
+    }
+
+    /* ---------- Generate HTML Reports ---------- */
+ 
+    stage('Generate HTML Reports') {
+
+            steps {
+
+                // IMPORTANT: use triple single quotes to avoid Groovy interpolating $variables in PowerShell
+
+                powershell '''
+
+                #region Helpers
+
+                Add-Type -AssemblyName System.Web
+ 
+                function HtmlEncode($text) {
+
+                    if ($null -eq $text) { return "" }
+
+                    return [System.Web.HttpUtility]::HtmlEncode([string]$text)
+
+                }
+ 
+                function Write-Table($headers, $rowsHtml, $title) {
+
+                    $headCells = ($headers | ForEach-Object { "<th>{0}</th>" -f (HtmlEncode $_) }) -join ""
+
+                    $style = @"
+<style>
+
+                          body { font-family: Segoe UI, Arial, sans-serif; margin: 16px; }
+
+                          h2 { margin-top: 24px; }
+
+                          table { border-collapse: collapse; width: 100%; }
+
+                          th, td { border: 1px solid #ddd; padding: 6px 8px; vertical-align: top; }
+
+                          th { background: #f5f5f5; }
+
+                          .sev-CRITICAL { background:#ffefef; }
+
+                          .sev-HIGH { background:#fff3f0; }
+
+                          .sev-MEDIUM { background:#fffaf0; }
+
+                          .sev-LOW { background:#f7fff7; }
+
+                          .sev-UNKNOWN { background:#f0f0f0; }
+
+                          .muted { color: #666; }
+
+                          pre { white-space: pre-wrap; word-wrap: break-word; }
+</style>
+
+"@
+
+                    $html = @"
+<html>
+<head>
+<meta charset="utf-8">
+<title>$title</title>
+
+  $style
+</head>
+<body>
+<h2>$title</h2>
+<table>
+<tr>$headCells</tr>
+
+    $rowsHtml
+</table>
+</body>
+</html>
+
+"@
+
+                    return $html
+
+                }
+ 
+                function Ensure-Dir($path) {
+
+                    if (!(Test-Path $path)) {
+
+                        New-Item -ItemType Directory -Path $path | Out-Null
+
+                    }
+
+                }
+
+                #endregion
+ 
+                $ErrorActionPreference = "Stop"
+
+                $reportDir = "$env:REPORT_DIR"
+
+                Ensure-Dir $reportDir
+ 
+                # --- Semgrep HTML ---
+
+                try {
+
+                    $semgrepJsonPath = Join-Path $reportDir "semgrep-report.json"
+
+                    if (Test-Path $semgrepJsonPath) {
+
+                        $sem = Get-Content $semgrepJsonPath -Raw | ConvertFrom-Json
+
+                        $results = @()
+
+                        if ($sem -and ($sem.PSObject.Properties.Name -contains 'results') -and $sem.results) {
+
+                            $results = $sem.results
+
+                        }
+ 
+                        $rows = @()
+
+                        $crit=0;$high=0;$med=0;$low=0
+ 
+                        foreach ($r in $results) {
+
+                            $rule     = $r.check_id
+
+                            $sev      = $r.extra.severity
+
+                            $file     = $r.path
+
+                            $line     = $r.start.line
+
+                            $msg      = $r.extra.message
+
+                            $meta     = if ($r.extra.metadata) { $r.extra.metadata | ConvertTo-Json -Compress } else { "" }
+
+                            $fix      = $r.extra.fix
+ 
+                            switch ($sev) {
+
+                                "CRITICAL" { $crit++ }
+
+                                "HIGH"     { $high++ }
+
+                                "MEDIUM"   { $med++ }
+
+                                "LOW"      { $low++ }
+
+                            }
+ 
+                            $cls = "sev-$sev"
+
+                            $rows += "<tr class=""$cls""><td>{0}</td><td>{1}</td><td>{2}</td><td class=""muted"">{3}</td><td>{4}</td><td class=""muted"">{5}</td></tr>" -f `
+
+                                (HtmlEncode $rule), (HtmlEncode $sev), (HtmlEncode $file), (HtmlEncode $line), (HtmlEncode $msg), (HtmlEncode $meta)
+ 
+                            if ($fix) {
+
+                                $rows += "<tr class=""$cls""><td colspan=""6""><strong>Fix:</strong><br><pre>{0}</pre></td></tr>" -f (HtmlEncode $fix)
+
+                            }
+
+                        }
+ 
+                        $summary = "<p><strong>Total:</strong> $($results.Count) &nbsp; | &nbsp; <strong>Critical:</strong> $crit &nbsp; <strong>High:</strong> $high &nbsp; <strong>Medium:</strong> $med &nbsp; <strong>Low:</strong> $low</p>"
+
+                        $rowsHtml = $summary + ($rows -join "`n")
+
+                        $headers = @("Rule", "Severity", "File", "Line", "Message", "Metadata")
+
+                        $html = Write-Table $headers $rowsHtml "Semgrep Findings"
+
+                        Set-Content (Join-Path $reportDir "semgrep-report.html") -Value $html -Encoding UTF8
+
+                    }
+ 
+} catch {
+
+                    Write-Host "Semgrep HTML generation failed: $($_.Exception.Message)"
+
+                }
+ 
+                # --- Trivy HTML ---
+
+                try {
+
+                    $trivyJsonPath = Join-Path $reportDir "trivy-report.json"
+
+                    if (Test-Path $trivyJsonPath) {
+
+                        $trivy = Get-Content $trivyJsonPath -Raw | ConvertFrom-Json
+
+                        $rows = @()
+
+                        $crit=0;$high=0;$med=0;$low=0;$unknown=0
+
+                        $total=0
+ 
+                        if ($trivy -and $trivy.Results) {
+
+                            foreach ($result in $trivy.Results) {
+
+                                if ($null -ne $result.Vulnerabilities) {
+
+                                    foreach ($v in $result.Vulnerabilities) {
+
+                                        $total++
+
+                                        $sev = $v.Severity
+
+                                        switch ($sev) {
+
+                                            "CRITICAL" { $crit++ }
+
+                                            "HIGH"     { $high++ }
+
+                                            "MEDIUM"   { $med++ }
+
+                                            "LOW"      { $low++ }
+
+                                            "UNKNOWN"  { $unknown++ }
+
+                                        }
+
+                                        $rows += "<tr class=""sev-$sev""><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td class=""muted"">{4}</td><td class=""muted"">{5}</td><td class=""muted"">{6}</td></tr>" -f `
+
+                                            (HtmlEncode $result.Target),
+
+                                            (HtmlEncode $v.VulnerabilityID),
+
+                                            (HtmlEncode $v.PkgName),
+
+                                            (HtmlEncode $sev),
+
+                                            (HtmlEncode $v.InstalledVersion),
+
+                                            (HtmlEncode $v.FixedVersion),
+
+                                            (HtmlEncode $v.Title)
+
+                                        if ($v.Description) {
+
+                                            $rows += "<tr class=""sev-$sev""><td colspan=""7""><strong>Description:</strong><br><pre>{0}</pre></td></tr>" -f (HtmlEncode $v.Description)
+
+                                        }
+
+                                        if ($v.References) {
+
+                                            $refs = ($v.References | ForEach-Object { "<li>{0}</li>" -f (HtmlEncode $_) }) -join ""
+
+                                            $rows += "<tr class=""sev-$sev""><td colspan=""7""><strong>References:</strong><ul>$refs</ul></td></tr>"
+
+                                        }
+
+                                    }
+
+                                }
+
+                            }
+
+                        }
+ 
+                        $summary = "<p><strong>Total:</strong> $total &nbsp; | &nbsp; <strong>Critical:</strong> $crit &nbsp; <strong>High:</strong> $high &nbsp; <strong>Medium:</strong> $med &nbsp; <strong>Low:</strong> $low &nbsp; <strong>Unknown:</strong> $unknown</p>"
+
+                        $rowsHtml = $summary + ($rows -join "`n")
+
+                        $headers = @("Target", "Vulnerability ID", "Package", "Severity", "Installed", "Fixed", "Title")
+
+                        $html = Write-Table $headers $rowsHtml "Trivy Vulnerabilities"
+
+                        Set-Content (Join-Path $reportDir "trivy-report.html") -Value $html -Encoding UTF8
+
+                    }
+
+                } catch {
+
+                    Write-Host "Trivy HTML generation failed: $($_.Exception.Message)"
+
+                }
+ 
+                # --- Gitleaks HTML ---
+
+                try {
+
+                    $glJsonPath = Join-Path $reportDir "gitleaks-report.json"
+
+                    if (Test-Path $glJsonPath) {
+
+                        $gl = Get-Content $glJsonPath -Raw | ConvertFrom-Json
+
+                        # Support both formats: object with `leaks` or raw array
+
+                        if ($gl -is [System.Collections.IEnumerable] -and -not ($gl.PSObject.Properties.Name -contains 'leaks')) {
+
+                            $leaks = $gl
+
+                        } else {
+
+                            $leaks = $gl.leaks
+
+                        }
+
+                        if (-not $leaks) { $leaks = @() }
+ 
+                        $rows = @()
+
+                        $count = 0
+
+                        foreach ($r in $leaks) {
+
+                            $count++
+
+                            $desc  = $r.Description
+
+                            $file  = $r.File
+
+                            $line  = $r.StartLine
+
+                            $rule  = $r.RuleID
+
+                            $repo  = $r.Repo
+
+                            $match = $r.Match
+
+                            $author= $r.Author
+
+                            $commit= $r.Commit
+
+                            $date  = $r.Date
+
+                            $rows += "<tr><td>{0}</td><td>{1}</td><td class=""muted"">{2}</td><td>{3}</td><td class=""muted"">{4}</td></tr>" -f `
+
+                                (HtmlEncode $desc), (HtmlEncode $file), (HtmlEncode $line), (HtmlEncode $rule), (HtmlEncode $repo)
+
+                            if ($match) {
+
+                                $rows += "<tr><td colspan=""5""><strong>Matched String (redacted):</strong><br><pre>{0}</pre></td></tr>" -f (HtmlEncode $match)
+
+                            }
+
+                            if ($commit -or $author -or $date) {
+
+                                $rows += "<tr><td colspan=""5""><strong>Git:</strong> Commit={0} &nbsp; Author={1} &nbsp; Date={2}</td></tr>" -f `
+
+                                    (HtmlEncode $commit), (HtmlEncode $author), (HtmlEncode $date)
+
+                            }
+
+                        }
+
+                        $summary = "<p><strong>Total Findings:</strong> $count</p>"
+
+                        $rowsHtml = $summary + ($rows -join "`n")
+
+                        $headers = @("Description", "File", "Line", "Rule", "Repo")
+
+                        $html = Write-Table $headers $rowsHtml "Gitleaks Findings"
+
+                        Set-Content (Join-Path $reportDir "gitleaks-report.html") -Value $html -Encoding UTF8
+
+                    }
+
+                } catch {
+
+                    Write-Host "Gitleaks HTML generation failed: $($_.Exception.Message)"
+
+                }
+
+                '''
+
+            }
+
+        }
+
+    /* ---------- Publish Reports ---------- */
+ 
+    stage('Publish Reports') {
+ 
+      steps {
+ 
+        publishHTML([
+ 
+          reportDir: env.REPORT_DIR,
+ 
+          reportFiles: '*.html',
+ 
+          reportName: 'Security Scan Reports',
+ 
+          keepAll: true,
+ 
+          alwaysLinkToLastBuild: true,
+ 
+          allowMissing: true
+ 
+        ])
+ 
+      }
+ 
+    }
+
+    /* ---------- Upload Reports to Azure ---------- */
+ 
+    stage('Upload Reports to Azure Blob Storage') {
+
+  steps {
+
+    withAzureKeyvault(
+
+      azureKeyVaultSecrets: [[
+
+        secretType: 'Secret',
+
+        name: env.AZURE_KV_SECRET,
+
+        envVariable: 'AZURE_STORAGE_KEY'
+
+      ]],
+
+      keyVaultURLOverride: env.AZURE_KV_URL
+
+    ) {
+
+      powershell '''
+
+Write-Host "Uploading reports to Azure Blob Storage..."
+
+az storage blob upload-batch `
+
+  --account-name $env:STORAGE_ACCOUNT `
+
+  --account-key  $env:AZURE_STORAGE_KEY `
+
+  --destination "$($env:STORAGE_CONTAINER)/$($env:APP_NAME)/PR-$($env:PR_COMMIT)" `
+
+  --source "$($env:REPORT_DIR)" `
+
+  --overwrite
+
+'''
+
+    }
+
+  }
+
+}
+
+stage('Aggregate Findings') {
+
+  steps {
+ 
+    script {
+
+      def reportDir = "${env.WORKSPACE}\\${env.REPORT_DIR}".replace('/', '\\')
+
+      int semgrepCritical = 0
+ 
+      int semgrepHigh     = 0
+ 
+      int semgrepMedium   = 0
+ 
+      int semgrepLow      = 0
+
+      int trivyCritical   = 0
+ 
+      int trivyHigh       = 0
+ 
+      int trivyMedium     = 0
+ 
+      int trivyLow        = 0
+ 
+      int trivyUnknown    = 0
+ 
+      int gitleaksCount   = 0
+
+      /* ---------- SEMGREP (FIXED MAPPING) ---------- */
+ 
+      if (fileExists("${reportDir}\\semgrep-report.json")) {
+ 
+        def sem = readJSON file: "${reportDir}\\semgrep-report.json"
+
+        sem?.results?.each { r ->
+ 
+          def sev = (
+ 
+            r?.extra?.severity ?:
+ 
+            r?.severity ?:
+ 
+            r?.extra?.metadata?.severity
+ 
+          )?.toString()?.toUpperCase()
+
+          switch (sev) {
+ 
+            case 'CRITICAL':
+ 
+              semgrepCritical++
+ 
+              break
+ 
+            case 'HIGH':
+ 
+            case 'ERROR':
+ 
+              semgrepHigh++
+ 
+              break
+ 
+            case 'MEDIUM':
+ 
+            case 'WARNING':
+ 
+              semgrepMedium++
+ 
+              break
+ 
+            case 'LOW':
+ 
+            case 'INFO':
+ 
+              semgrepLow++
+ 
+              break
+ 
+          }
+ 
+        }
+ 
+      }
+
+ 
+/* ---------- TRIVY ---------- */
+ 
+      if (fileExists("${reportDir}\\trivy-report.json")) {
+ 
+        def trivy = readJSON file: "${reportDir}\\trivy-report.json"
+ 
+        def results = trivy?.Results ?: trivy?.results ?: []
+
+        results.each { r ->
+ 
+          r?.Vulnerabilities?.each { v ->
+ 
+            def sev = v?.Severity?.toString()?.toUpperCase()
+ 
+            if (sev == 'CRITICAL') trivyCritical++
+ 
+            if (sev == 'HIGH')     trivyHigh++
+ 
+            if (sev == 'MEDIUM')   trivyMedium++
+ 
+            if (sev == 'LOW')      trivyLow++
+ 
+            if (sev == 'UNKNOWN')  trivyUnknown++
+ 
+          }
+ 
+        }
+ 
+      }
+
+      /* ---------- GITLEAKS ---------- */
+ 
+      if (fileExists("${reportDir}\\gitleaks-report.json")) {
+ 
+        def gl = readJSON file: "${reportDir}\\gitleaks-report.json"
+ 
+        gitleaksCount = gl?.leaks?.size() ?: (gl?.size() ?: 0)
+ 
+      }
+
+      /* ---------- EXPORT ---------- */
+ 
+      env.SEMGREP_CRITICAL = semgrepCritical.toString()
+ 
+      env.SEMGREP_HIGH     = semgrepHigh.toString()
+ 
+      env.SEMGREP_MEDIUM   = semgrepMedium.toString()
+ 
+      env.SEMGREP_LOW      = semgrepLow.toString()
+
+      env.TRIVY_CRITICAL   = trivyCritical.toString()
+ 
+      env.TRIVY_HIGH       = trivyHigh.toString()
+ 
+      env.TRIVY_MEDIUM     = trivyMedium.toString()
+ 
+      env.TRIVY_LOW        = trivyLow.toString()
+ 
+      env.TRIVY_UNKNOWN    = trivyUnknown.toString()
+
+      env.GITLEAKS_COUNT   = gitleaksCount.toString()
+
+      env.TOTAL_FINDINGS = (
+ 
+        semgrepCritical + semgrepHigh + semgrepMedium + semgrepLow +
+ 
+        trivyCritical + trivyHigh + trivyMedium + trivyLow + trivyUnknown +
+ 
+        gitleaksCount
+ 
+      ).toString()
+
+      echo "Security Summary:"
+ 
+      echo "Semgrep C=${env.SEMGREP_CRITICAL}, H=${env.SEMGREP_HIGH}, M=${env.SEMGREP_MEDIUM}, L=${env.SEMGREP_LOW}"
+ 
+      echo "Trivy   C=${env.TRIVY_CRITICAL}, H=${env.TRIVY_HIGH}, M=${env.TRIVY_MEDIUM}, L=${env.TRIVY_LOW}, U=${env.TRIVY_UNKNOWN}"
+ 
+      echo "Gitleaks=${env.GITLEAKS_COUNT}"
+ 
+      echo "TOTAL_FINDINGS=${env.TOTAL_FINDINGS}"
+ 
+    }
+ 
+  }
+ 
+}
+
+    stage('Security Quality Gate') {
+ 
+  steps {
+ 
+    script {
+ 
+      if (env.TOTAL_FINDINGS.toInteger() > 0) {
+ 
+        echo "SECURITY QUALITY GATE PASSED "
+ 
+        echo "Findings detected but allowed as per CC policy: ${env.TOTAL_FINDINGS}"
+
+        // DO NOT fail the build in CC
+ 
+        currentBuild.result = 'SUCCESS'
+ 
+        env.SECURITY_GATE_FAILED = 'false'
+ 
+      } else {
+ 
+        echo "SECURITY QUALITY GATE PASSED – No findings"
+ 
+        env.SECURITY_GATE_FAILED = 'false'
+ 
+      }
+ 
+    }
+ 
+  }
+ 
+}
+ 
+ 
+    /* ---------- Get Okta Access Token ---------- */
+
+    stage('Get Okta Access Token') {
+ 
+      steps {
+ 
+        withCredentials([
+ 
+          string(credentialsId: 'OKTA_CLIENT_ID', variable: 'OKTA_CLIENT_ID'),
+ 
+          string(credentialsId: 'OKTA_CLIENT_SECRET', variable: 'OKTA_CLIENT_SECRET')
+ 
+        ]) {
+ 
+          script {
+ 
+            def tokenResp = httpRequest(
+ 
+              httpMode: 'POST',
+ 
+              url: env.OKTA_TOKEN_URL,
+ 
+              contentType: 'APPLICATION_FORM',
+ 
+              requestBody:
+ 
+                "grant_type=client_credentials&" +
+ 
+                "scope=cicd.qualitygates.read cicd.qualitygates.write " +
+ 
+                "tenant.${env.CICD_TENANT} project.${env.CICD_STAR_SYSTEM}&" +
+ 
+                "client_id=${OKTA_CLIENT_ID}&client_secret=${OKTA_CLIENT_SECRET}"
+ 
+            )
+ 
+            env.CICD_TOKEN = readJSON(text: tokenResp.content).access_token
+ 
+          }
+ 
+        }
+ 
+      }
+ 
+    }
+
+ 
+/* ---------- Close Guidewire Quality Gate ---------- */
+ 
+    stage('Close Guidewire Quality Gate') {
+ 
+  steps {
+ 
+    script {
+ 
+      echo "Closing Guidewire Quality Gate "
+
+      retry(3) {
+ 
+        httpRequest(
+ 
+          httpMode: 'POST',
+ 
+          url: "${env.CICD_BASE_URL}/api/v3/tenants/${env.CICD_TENANT}" +
+ 
+               "/starsystems/${env.CICD_STAR_SYSTEM}" +
+ 
+               "/applications/${env.CICD_APP}" +
+ 
+               "/quality-gates/${env.CICD_QUALITY_GATE}/verifications",
+ 
+          contentType: 'APPLICATION_JSON',
+ 
+          customHeaders: [[
+ 
+            name: 'Authorization',
+ 
+            value: "Bearer ${env.CICD_TOKEN}",
+ 
+            maskValue: true
+ 
+          ]],
+ 
+          requestBody: """
+ 
+{
+ 
+  "artifact": { "type": "COMMIT", "id": "${params.PR_COMMIT}" },
+ 
+  "status": "SUCCESSFUL",
+ 
+  "url": "${params.PR_URL}",
+ 
+  "comment": "Security scans completed – findings accepted as per CC policy"
+ 
+}
+ 
+"""
+ 
+        )
+ 
+      }
+ 
+    }
+ 
+  }
+ 
+}
+ 
+ 
+    stage('Finalize Build Status') {
+ 
+      steps {
+ 
+        script {
+ 
+          if (env.SECURITY_GATE_FAILED == 'true') {
+ 
+            error("Pipeline failed due to security findings")
+ 
+          }
+ 
+        }
+ 
+      }
+ 
+    }
+ 
+  }
+ 
+  /* =========================
+ 
+     POST ACTIONS (EMAIL)
+ 
+    ========================= */
+
+  post {
+ 
+  always {
+ 
+    script {
+ 
+      withCredentials([
+ 
+        string(credentialsId: 'NOTIFICATION_EMAILS', variable: 'NOTIFICATION_EMAILS')
+ 
+      ]) {
+ 
+        if (!env.NOTIFICATION_EMAILS?.trim()) {
+ 
+          echo "NOTIFICATION_EMAILS credential is empty. Skipping email."
+ 
+          return
+ 
+        }
+
+        def ok = currentBuild.currentResult == 'SUCCESS'
+
+        emailext(
+ 
+          subject: "PR Security Scan ${ok ? 'SUCCESS' : 'FAILURE'}: ${env.APP_NAME} #${env.BUILD_NUMBER}",
+ 
+          mimeType: 'text/html',
+ 
+          to: env.NOTIFICATION_EMAILS,
+ 
+          body: """<html><body>
+<h3 style="color:${ok ? 'green' : 'red'};">
+ 
+${ok ? 'All security scans completed successfully.' : 'Security scan failures detected.'}
+</h3>
+<p><b>Scan Summary:</b></p>
+<ul>
+<li>Semgrep – Critical: ${env.SEMGREP_CRITICAL},
+ 
+    High: ${env.SEMGREP_HIGH},
+ 
+    Medium: ${env.SEMGREP_MEDIUM},
+ 
+    Low: ${env.SEMGREP_LOW}</li>
+<li>Trivy – Critical: ${env.TRIVY_CRITICAL},
+ 
+    High: ${env.TRIVY_HIGH},
+ 
+    Medium: ${env.TRIVY_MEDIUM},
+ 
+    Low: ${env.TRIVY_LOW},
+ 
+    Unknown: ${env.TRIVY_UNKNOWN}</li>
+<li>Gitleaks – Secrets detected: ${env.GITLEAKS_COUNT}</li>
+</ul>
+<hr>
+<h2 style="color:${ok ? 'green' : 'red'};">Jenkins Build Details</h2>
+<table border="1" cellpadding="5">
+<tr><th>Name</th><th>Value</th></tr>
+<tr><td>Build Number</td><td>${env.BUILD_NUMBER}</td></tr>
+<tr><td>Job Name</td><td>${env.JOB_NAME}</td></tr>
+<tr>
+<td>Build Status</td>
+<td style="color:${ok ? 'green' : 'red'};"><b>${currentBuild.currentResult}</b></td>
+</tr>
+<tr>
+<td>Build URL</td>
+<td><a href="${env.BUILD_URL}" target="_blank">Open Jenkins Build</a></td>
+</tr>
+<tr><td>Branch</td><td>${env.CLEAN_BRANCH}</td></tr>
+<tr>
+<td>Console</td>
+<td><a href="${env.BUILD_URL}console" target="_blank">View Console Logs</a></td>
+</tr>
+<tr>
+<td>Pull Request</td>
+<td><a href="${params.PR_URL}" target="_blank">Open Pull Request</a></td>
+</tr>
+</table>
+</body></html>"""
+ 
+        )
+ 
+      }
+ 
+    }
+ 
+  }
+ 
+}
+ 
+}
+ 
+ 
+ 
+pipeline {
+
+  agent any
+ 
+  environment {
+
+    JIRA_URL        = "https://redrivermutual.atlassian.net"
+
+    JIRA_CRED       = "Jira-api-token-vanand"
+ 
+    PROJECT_KEY     = "GWCP"
+
+    DATETIME_FIELD  = "customfield_11020"
+ 
+    DEPLOY_JOB      = "SB-deployer"
+
+  }
+ 
+  parameters {
+
+    string(name: 'ISSUE_KEY', description: 'Jira Issue Key')
+
+    string(name: 'environment', description: 'GWCP Environment')
+
+    string(name: 'GWCPDeploymentDateTime', description: 'Deployment DateTime from Jira')
+
+  }
+ 
+  stages {
+ 
+    /* ============================
+
+       Parse Jira Parameters
+
+    ============================ */
+
+    stage('Parse Jira Parameters') {
+
+      steps {
+
+        script {
+
+          def issueKey = params.ISSUE_KEY?.trim()
+
+          def envName  = params.environment?.trim()
+
+          def rawDate  = params.GWCPDeploymentDateTime?.trim()
+ 
+          echo """
+
+Issue Key  : ${issueKey}
+
+Environment: ${envName}
+
+Deploy Time: ${rawDate}
+
+"""
+ 
+          if (!issueKey || !envName || !rawDate) {
+
+            error "Missing required Jira parameters"
+
+          }
+ 
+          env.ISSUE_KEY  = issueKey
+
+          env.TARGET_ENV = envName
+
+          env.RAW_DATE   = rawDate
+
+        }
+
+      }
+
+    }
+ 
+    /* ============================
+
+       Parse & Normalize Date (UTC via PowerShell)
+
+       -> PARSED_TIME_MS (epoch ms UTC), JQL_TIME ("yyyy-MM-dd HH:mm" UTC)
+
+    ============================ */
+
+    stage('Parse & Normalize Date (UTC via PowerShell)') {
+
+      steps {
+
+        script {
+
+          def psOut = powershell(returnStdout: true, script: '''
+
+$raw = $env:RAW_DATE
+ 
+# Normalize offsets like +0000 -> +00:00 ; +0530 -> +05:30
+
+$normalized = [Regex]::Replace($raw, "([\\+\\-]\\d{2})(\\d{2})$", '$1:$2')
+ 
+# Parse as DateTimeOffset (handles ISO-8601 with offset/Z)
+
+try {
+
+    $dto = [DateTimeOffset]::Parse($normalized)
+
+}
+
+catch {
+
+    try {
+
+        $dt  = [DateTime]::Parse($normalized)
+
+        $dto = New-Object System.DateTimeOffset ($dt.ToUniversalTime())
+
+    }
+
+    catch {
+
+        $err = @{ error = "Unable to parse date"; raw = $raw } | ConvertTo-Json -Compress
+
+        Write-Output $err
+
+        exit 1
+
+    }
+
+}
+ 
+# Target epoch ms (UTC)
+
+$epochMs = $dto.ToUnixTimeMilliseconds()
+ 
+# JQL fuzzy time in UTC "yyyy-MM-dd HH:mm"
+
+$jqlTime = $dto.UtcDateTime.ToString("yyyy-MM-dd HH:mm")
+ 
+@{
+
+  PARSED_TIME_MS = "$epochMs"
+
+  JQL_TIME       = "$jqlTime"
+
+} | ConvertTo-Json -Compress
+
+''')
+ 
+          def parsedJson = readJSON text: psOut
+
+          if (parsedJson?.error) {
+
+            error "${parsedJson.error}: ${parsedJson.raw}"
+
+          }
+ 
+          env.PARSED_TIME_MS = parsedJson.PARSED_TIME_MS.toString()
+
+          env.JQL_TIME       = parsedJson.JQL_TIME.toString()
+ 
+          echo "Parsed time (ms UTC) = ${env.PARSED_TIME_MS}"
+
+          echo "JQL_TIME (UTC)       = ${env.JQL_TIME}"
+
+        }
+
+      }
+
+    }
+ 
+    /* ============================
+
+       Check Conflicts in Jira (new endpoint)
+
+    ============================ */
+
+    stage('Check Conflicts in Jira') {
+
+      steps {
+
+        script {
+
+          // NOTE: This matches same-time deployments; adjust as needed.
+
+          def jql = """
+
+project = ${PROJECT_KEY}
+
+AND ${DATETIME_FIELD} ~ "${env.JQL_TIME}"
+
+""".trim()
+ 
+          echo "JQL = ${jql}"
+ 
+          def encoded = java.net.URLEncoder.encode(jql, "UTF-8")
+
+          //New endpoint (old /search is removed in Jira Cloud)
+
+          def url = "${env.JIRA_URL}/rest/api/3/search/jql?jql=${encoded}"
+ 
+          def resp = httpRequest(
+
+            url: url,
+
+            httpMode: 'GET',
+
+            authentication: env.JIRA_CRED,
+
+            validResponseCodes: '200'
+
+          )
+ 
+          def result   = readJSON text: resp.content
+
+          def issues   = (result?.issues ?: [])
+
+          env.CONFLICT = (issues.size() > 1).toString()   // treat >=2 as conflict (includes current)
+
+          echo "Conflict found = ${env.CONFLICT} (matches=${issues.size()})"
+
+        }
+
+      }
+
+    }
+ 
+    /* ============================
+
+       Comment Back to Jira
+
+    ============================ */
+
+    stage('Comment Back to Jira') {
+
+      steps {
+
+        script {
+
+          def msg = (env.CONFLICT == "true")
+
+            ? "Deployment conflict detected. Another deployment exists at the same time."
+
+            : "Deployment validated. Jenkins will execute at the scheduled time."
+ 
+          def body = """
+
+{
+
+  "body": {
+
+    "type": "doc",
+
+    "version": 1,
+
+    "content": [{
+
+      "type": "paragraph",
+
+      "content": [{
+
+        "type": "text",
+
+        "text": "${msg}"
+
+      }]
+
+    }]
+
+  }
+
+}
+
+"""
+ 
+          httpRequest(
+
+            url: "${env.JIRA_URL}/rest/api/3/issue/${env.ISSUE_KEY}/comment",
+
+            httpMode: 'POST',
+
+            authentication: 'Jira-api-token-vanand',
+
+            contentType: 'APPLICATION_JSON',
+
+            requestBody: body,
+
+            validResponseCodes: '200:299'
+
+          )
+
+        }
+
+      }
+
+    }
+ 
+    /* ============================
+
+       Schedule Deploy Pipeline (NO AGENT BLOCK)
+
+       - UTC delay calculation via PowerShell → JSON
+
+       - Optional Jira↔Jenkins clock-skew correction
+
+    ============================ */
+
+stage('Schedule Deploy Pipeline (NO AGENT BLOCK)') {
+
+  when {
+
+    expression { env.CONFLICT == "false" }
+
+  }
+
+  steps {
+
+    script {
+
+      // 1) Compute delay purely in UTC on the Windows agent (PowerShell → JSON)
+
+      def delayJson = powershell(returnStdout: true, script: '''
+
+$targetMs     = [int64]$env:PARSED_TIME_MS
+
+$jenkinsNowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+ 
+# Safety buffer — seconds
+
+$safetyBufferSec = 5
+ 
+# Difference in seconds (floor to avoid fractional)
+
+$deltaSec = [math]::Floor( ($targetMs - $jenkinsNowMs) / 1000 )
+ 
+# Apply safety buffer and clamp
+
+$correctedDelaySec = $deltaSec - $safetyBufferSec
+
+if ($correctedDelaySec -lt 0) { $correctedDelaySec = 0 }
+ 
+@{
+
+  TARGET_MS           = "$targetMs"
+
+  JENKINS_NOW_MS      = "$jenkinsNowMs"
+
+  DELTA_SEC           = "$deltaSec"
+
+  CORRECTED_DELAY_SEC = "$correctedDelaySec"
+
+} | ConvertTo-Json -Compress
+
+''')
+ 
+      def delayObj = readJSON text: delayJson
+
+      def correctedDelaySec = delayObj.CORRECTED_DELAY_SEC.toInteger()
+ 
+      // 2) Optional clock skew correction using Jira 'Date' header (RFC‑1123)
+
+      def probe = httpRequest(
+
+        url: "${env.JIRA_URL}/rest/api/3/search/jql?jql=project%3D${env.PROJECT_KEY}&maxResults=1&fields=key",
+
+        httpMode: 'GET',
+
+        authentication: env.JIRA_CRED,
+
+        validResponseCodes: '200'
+
+      )
+ 
+      def jiraDateHeader = probe.headers?.get('Date') ?: probe.headers?.get('date')
+
+      if (jiraDateHeader instanceof java.util.List && !jiraDateHeader.isEmpty()) {
+
+        jiraDateHeader = jiraDateHeader[0]
+
+      }
+ 
+      if (jiraDateHeader) {
+
+        def skewJson = powershell(returnStdout: true, script: """
+
+\$jenkinsNowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+
+\$jiraNowMs    = ([DateTimeOffset]::ParseExact('${jiraDateHeader}', 'r', [Globalization.CultureInfo]::InvariantCulture)).ToUnixTimeMilliseconds()
+
+\$clockSkewMs  = (\$jiraNowMs - \$jenkinsNowMs)
+
+@{ CLOCK_SKEW_MS = \"\$clockSkewMs\" } | ConvertTo-Json -Compress
+
+""")
+
+        def skewObj = readJSON text: skewJson
+
+        def skewMs = (skewObj?.CLOCK_SKEW_MS ?: "0").toLong()
+
+        correctedDelaySec = correctedDelaySec - (skewMs / 1000).intValue()
+
+      }
+ 
+      if (correctedDelaySec < 0) correctedDelaySec = 0
+ 
+      echo "Target (ms UTC): ${delayObj.TARGET_MS}"
+
+      echo "Jenkins now (ms UTC): ${delayObj.JENKINS_NOW_MS}"
+
+      echo "Raw delta (sec): ${delayObj.DELTA_SEC}"
+
+      echo "Corrected delay (sec): ${correctedDelaySec}"
+ 
+      // 3) Trigger downstream job with quietPeriod = correctedDelaySec
+
+      build job: env.DEPLOY_JOB,
+
+        quietPeriod: correctedDelaySec,
+
+        wait: false,
+
+        parameters: [
+
+          string(name: 'ISSUE_KEY',       value: env.ISSUE_KEY),
+
+          string(name: 'TARGET_ENV',      value: env.TARGET_ENV),
+
+          string(name: 'DEPLOY_DATETIME', value: env.RAW_DATE)
+
+        ]
+
+    }
+
+  }
+
+}
+
+}
+ 
+  post {
+
+    success {
+
+      echo 'Validator pipeline completed successfully.'
+
+    }
+
+    failure {
+
+      echo 'Validator pipeline failed due to conflict or validation error.'
+
+    }
+
+  }
+
+}
+
+ 
+pipeline {
+ 
+    agent { label 'jenkins-master' }
+ 
+    tools {
+
+        git 'Default'
+
+        maven 'Maven-3.9'
+
+    }
+ 
+    parameters {
+
+        string(name: 'ISSUE_KEY', description: 'Jira Issue Key')
+
+        string(name: 'TARGET_ENV', defaultValue: 'dev3')
+
+        string(name: 'DEPLOY_DATETIME')
+
+        string(name: 'GIT_BRANCH', defaultValue: '*/develop')
+
+    }
+ 
+    environment {
+ 
+        /* ---------------- Jira ---------------- */
+
+        JIRA_URL  = 'https://redrivermutual.atlassian.net'
+
+        JIRA_CRED = 'Jira-api-token-vanand'
+
+        JIRA_DONE_TRANSITION = '21'
+
+        JIRA_OPEN_TRANSITION = '111'
+ 
+        /* ---------------- Target ---------------- */
+
+        TARGET_SERVER = '10.102.0.9'
+ 
+        /* ---------------- Tomcat ---------------- */
+
+        SERVICE_NAME  = 'Springboot-Dev3'
+
+        DEPLOY_DIR    = 'E:\\Apps\\Springboot-Dev3\\webapps\\rrmsb'
+
+        BACKUP_DIR    = 'E:\\Apps\\Springboot-Dev3\\backup'
+
+        ARTIFACT_NAME = 'rrmsb.war'
+
+        TOMCAT_LOG_DIR = 'E:\\Apps\\Springboot-Dev3\\logs'
+
+    }
+ 
+    stages {
+ 
+        stage('Start Deployment') {
+
+            steps {
+
+                echo """
+
+==================================================
+
+DEPLOYMENT STARTED
+
+Issue       : ${params.ISSUE_KEY}
+
+Environment : ${params.TARGET_ENV}
+
+Branch      : ${params.GIT_BRANCH}
+
+Scheduled   : ${params.DEPLOY_DATETIME}
+
+Target Host : ${env.TARGET_SERVER}
+
+Service     : ${env.SERVICE_NAME}
+
+==================================================
+
+"""
+
+            }
+
+        }
+ 
+        stage('Checkout Source Code') {
+
+            steps {
+
+                checkout([
+
+                    $class: 'GitSCM',
+
+                    branches: [[name: params.GIT_BRANCH]],
+
+                    userRemoteConfigs: [[
+
+                        url: 'http://bitbucket.redrivermutual.com:7990/scm/rrmsprin/rrmspringboot.git',
+
+                        credentialsId: 'Bitbucket-API-token'
+
+                    ]]
+
+                ])
+
+            }
+
+        }
+ 
+        stage('Build Application') {
+
+            steps {
+
+                bat 'mvn clean package -DskipTests'
+
+            }
+
+        }
+ 
+        stage('Validate WAR Artifact') {
+
+            steps {
+
+                powershell '''
+
+                $war = "target\\$env:ARTIFACT_NAME"
+
+                if (-not (Test-Path $war)) {
+
+                    throw "WAR file not found at $war"
+
+                }
+
+                Write-Host "WAR file validated at $war"
+
+                '''
+
+            }
+
+        }
+ 
+        stage('Deploy via PowerShell Remoting') {
+
+            steps {
+
+                withCredentials([
+
+                   string(credentialsId: 'test-jenkins-serviceuser', variable: 'DP_USERNAME'),
+
+                   string(credentialsId: 'test-jenkins-servicepass', variable: 'DP_PASSWORD')
+
+                ]) {
+
+                    powershell '''
+
+                    Write-Host "Creating credential object"
+ 
+                    $secPass = ConvertTo-SecureString $env:DP_PASSWORD -AsPlainText -Force
+
+                    $cred    = New-Object System.Management.Automation.PSCredential ($env:DP_USERNAME, $secPass)
+ 
+                    Invoke-Command -ComputerName $env:TARGET_SERVER -Credential $cred -ScriptBlock {
+
+                        param($ServiceName, $DeployDir, $BackupDir, $Artifact)
+ 
+                        Write-Host "Stopping service $ServiceName"
+
+                        if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+
+                            Stop-Service -Name $ServiceName -Force
+
+                            Start-Sleep -Seconds 10
+
+                        }
+ 
+                        if (Test-Path "$DeployDir\\$Artifact") {
+
+                            Write-Host "Backing up existing WAR"
+
+                            New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
+
+                            Copy-Item "$DeployDir\\$Artifact" "$BackupDir\\$Artifact.bak" -Force
+
+                        }
+
+                    } -ArgumentList $env:SERVICE_NAME, $env:DEPLOY_DIR, $env:BACKUP_DIR, $env:ARTIFACT_NAME
+ 
+                    $session = New-PSSession -ComputerName $env:TARGET_SERVER -Credential $cred
+
+                    Copy-Item -Path "target\\$env:ARTIFACT_NAME" -Destination "$env:DEPLOY_DIR\\$env:ARTIFACT_NAME" -ToSession $session -Force
+
+                    Remove-PSSession $session
+ 
+                    Invoke-Command -ComputerName $env:TARGET_SERVER -Credential $cred -ScriptBlock {
+
+                        param($ServiceName)
+
+                        Write-Host "Starting service $ServiceName"
+
+                        Start-Service -Name $ServiceName
+
+                    } -ArgumentList $env:SERVICE_NAME
+ 
+                    Write-Host "Deployment completed"
+
+                    '''
+
+                }
+
+            }
+
+        }
+ 
+        stage('Health Check') {
+
+            steps {
+
+                withCredentials([
+
+                    usernamePassword(
+
+                        credentialsId: 'jenkins-target-server-creds',
+
+                        usernameVariable: 'DP_USERNAME',
+
+                        passwordVariable: 'DP_PASSWORD'
+
+                    )
+
+                ]) {
+
+                    powershell '''
+
+                    Write-Host "========================================"
+
+                    Write-Host "Post-deployment health verification"
+
+                    Write-Host "========================================"
+ 
+                    $secPass = ConvertTo-SecureString $env:DP_PASSWORD -AsPlainText -Force
+
+                    $cred    = New-Object System.Management.Automation.PSCredential ($env:DP_USERNAME, $secPass)
+ 
+                    Invoke-Command -ComputerName $env:TARGET_SERVER -Credential $cred -ScriptBlock {
+
+                        param($ServiceName, $LogDir)
+ 
+                        Write-Host "Checking Windows service: $ServiceName"
+
+                        $svc = Get-Service -Name $ServiceName -ErrorAction Stop
+
+                        if ($svc.Status -ne 'Running') {
+
+                            throw "Service $ServiceName is not running"
+
+                        }
+ 
+                        if (-not (Test-Path $LogDir)) {
+
+                            throw "Tomcat log directory not found: $LogDir"
+
+                        }
+ 
+                        $recentLogs = Get-ChildItem $LogDir -Filter *.log -Recurse |
+
+                                      Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-5) }
+ 
+                        if (-not $recentLogs) {
+
+                            throw "No recent Tomcat log activity detected"
+
+                        }
+ 
+                        Write-Host "HEALTH CHECK PASSED"
+
+                    } -ArgumentList $env:SERVICE_NAME, $env:TOMCAT_LOG_DIR
+
+                    '''
+
+                }
+
+            }
+
+        }
+
+    }
+ 
+    post {
+ 
+        success {
+
+            script {
+
+                try {
+
+                    jiraComment("Deployment successful on server ${env.TARGET_SERVER}. Health verification passed.")
+
+                    jiraTransition(JIRA_DONE_TRANSITION)
+
+                } catch (err) {
+
+                    echo "Jira update failed (non-blocking): ${err}"
+
+                }
+
+            }
+
+        }
+ 
+        failure {
+
+            script {
+
+                echo "========== ROLLBACK INITIATED =========="
+ 
+                withCredentials([
+
+                    usernamePassword(
+
+                        credentialsId: 'jenkins-target-server-creds',
+
+                        usernameVariable: 'DP_USERNAME',
+
+                        passwordVariable: 'DP_PASSWORD'
+
+                    )
+
+                ]) {
+
+                    powershell '''
+
+                    $secPass = ConvertTo-SecureString $env:DP_PASSWORD -AsPlainText -Force
+
+                    $cred    = New-Object System.Management.Automation.PSCredential ($env:DP_USERNAME, $secPass)
+ 
+                    Invoke-Command -ComputerName $env:TARGET_SERVER -Credential $cred -ScriptBlock {
+
+                        param($ServiceName, $DeployDir, $BackupDir, $Artifact)
+ 
+                        $backup = "$BackupDir\\$Artifact.bak"
+
+                        if (-not (Test-Path $backup)) {
+
+                            Write-Host "No backup found, rollback skipped"
+
+                            return
+
+                        }
+ 
+                        Stop-Service -Name $ServiceName -Force
+
+                        Start-Sleep -Seconds 10
+
+                        Copy-Item $backup "$DeployDir\\$Artifact" -Force
+
+                        Start-Service -Name $ServiceName
+ 
+                        Write-Host "Rollback completed"
+
+                    } -ArgumentList $env:SERVICE_NAME, $env:DEPLOY_DIR, $env:BACKUP_DIR, $env:ARTIFACT_NAME
+
+                    '''
+
+                }
+ 
+                try {
+
+                    jiraComment("Deployment failed. Automatic rollback executed on ${env.TARGET_SERVER}.")
+
+                    jiraTransition(JIRA_OPEN_TRANSITION)
+
+                } catch (err) {
+
+                    echo "Jira rollback update failed (non-blocking): ${err}"
+
+                }
+
+            }
+
+        }
+
+    }
+
+}
+ 
+/* ===================== Jira Helpers ===================== */
+ 
+def jiraComment(message) {
+
+    def body = """
+
+{
+
+  "body": {
+
+    "type": "doc",
+
+    "version": 1,
+
+    "content": [{
+
+      "type": "paragraph",
+
+      "content": [{
+
+        "type": "text",
+
+        "text": "${message}"
+
+      }]
+
+    }]
+
+  }
+
+}
+
+"""
+
+    httpRequest(
+
+        url: "${env.JIRA_URL}/rest/api/3/issue/${params.ISSUE_KEY}/comment",
+
+        httpMode: 'POST',
+
+        authentication: env.JIRA_CRED,
+
+        contentType: 'APPLICATION_JSON',
+
+        requestBody: body,
+
+        validResponseCodes: '200:299'
+
+    )
+
+}
+ 
+def jiraTransition(transitionId) {
+
+    def body = """{ "transition": { "id": "${transitionId}" } }"""
+
+    httpRequest(
+
+        url: "${env.JIRA_URL}/rest/api/3/issue/${params.ISSUE_KEY}/transitions",
+
+        httpMode: 'POST',
+
+        authentication: env.JIRA_CRED,
+
+        contentType: 'APPLICATION_JSON',
+
+        requestBody: body,
+
+        validResponseCodes: '200:299'
+
+    )
+
+}
+
+ 
+pipeline {
+
     agent any
 
-    parameters {
-        string(name: 'jiraKey', defaultValue: '', description: 'Jira Issue Key')
-        string(name: 'starSystem', defaultValue: '', description: 'Star System')
-        string(name: 'planet', defaultValue: '', description: 'Planet')
-        string(name: 'branch', defaultValue: '', description: 'Branch Name')
-        string(name: 'requestDate', defaultValue: '', description: 'Requested Deployment Date')
-    }
+   environment {
+
+    REPORT_DIR = "reports"
+
+    AZURE_CLI = "C:\\Program Files\\Microsoft SDKs\\Azure\\CLI2\\wbin"
+
+    PATH = "${AZURE_CLI};${env.PATH}"
+
+    AZURE_STORAGE_ACCOUNT  = 'azrd0st0jnk1'
+
+    AZURE_CONTAINER        = 'jnk-data01'
+
+}
+
+  options {
+
+  skipDefaultCheckout(true)
+
+}
 
     stages {
-        stage('Validate Payload') {
+
+        stage('Checkout') {
+
             steps {
+
+                cleanWs()
+
+                checkout scm
+
+                echo "Scanning PR: ${env.CHANGE_ID} from ${env.CHANGE_BRANCH} -> ${env.CHANGE_TARGET}"
+
+            }
+
+        }
+
+        stage('Semgrep Scan') {
+
+            steps {
+
                 script {
-                    if (!params.jiraKey || !params.branch) {
-                        error("Missing mandatory fields from Jira request!")
+
+                    env.SEMGREP_EXIT = bat(
+
+                        returnStatus: true,
+
+                        script: """
+
+                            chcp 65001 >NUL
+
+                            set PYTHONUTF8=1
+
+                            if not exist "%REPORT_DIR%" mkdir "%REPORT_DIR%"
+
+                            semgrep scan --config=auto --json > "%REPORT_DIR%\\semgrep-report.json" || exit 0
+
+                        """
+
+                    ).toString()
+
+                }
+
+            }
+
+        }
+
+        stage('Trivy Scan') {
+
+            steps {
+
+                script {
+
+                    env.TRIVY_EXIT = bat(
+
+                        returnStatus: true,
+
+                        script: """
+
+                            chcp 65001 >NUL
+
+                            if not exist "%REPORT_DIR%" mkdir "%REPORT_DIR%"
+
+                            trivy fs . --format json --output "%REPORT_DIR%\\trivy-report.json " || exit 0
+
+                        """
+
+                    ).toString()
+
+                }
+
+            }
+
+        }
+
+        stage('Gitleaks Scan') {
+
+            steps {
+
+                script {
+
+                    env.GITLEAKS_EXIT = bat(
+
+                        returnStatus: true,
+
+                        script: """
+
+                            chcp 65001 >NUL
+
+                            if not exist "%REPORT_DIR%" mkdir "%REPORT_DIR%"
+
+                            gitleaks detect --source . --report-format json --report-path "%REPORT_DIR%\\gitleaks-report.json" || exit 0
+
+                        """
+
+                    ).toString()
+
+                }
+
+            }
+
+        }
+
+        stage('Generate HTML Reports') {
+
+            steps {
+
+                // IMPORTANT: use triple single quotes to avoid Groovy interpolating $variables in PowerShell
+
+                powershell '''
+
+                #region Helpers
+
+                Add-Type -AssemblyName System.Web
+ 
+                function HtmlEncode($text) {
+
+                    if ($null -eq $text) { return "" }
+
+                    return [System.Web.HttpUtility]::HtmlEncode([string]$text)
+
+                }
+ 
+                function Write-Table($headers, $rowsHtml, $title) {
+
+                    $headCells = ($headers | ForEach-Object { "<th>{0}</th>" -f (HtmlEncode $_) }) -join ""
+
+                    $style = @"
+<style>
+
+                          body { font-family: Segoe UI, Arial, sans-serif; margin: 16px; }
+
+                          h2 { margin-top: 24px; }
+
+                          table { border-collapse: collapse; width: 100%; }
+
+                          th, td { border: 1px solid #ddd; padding: 6px 8px; vertical-align: top; }
+
+                          th { background: #f5f5f5; }
+
+                          .sev-CRITICAL { background:#ffefef; }
+
+                          .sev-HIGH { background:#fff3f0; }
+
+                          .sev-MEDIUM { background:#fffaf0; }
+
+                          .sev-LOW { background:#f7fff7; }
+
+                          .muted { color: #666; }
+
+                          pre { white-space: pre-wrap; word-wrap: break-word; }
+</style>
+
+"@
+
+                    $html = @"
+<html>
+<head>
+<meta charset="utf-8">
+<title>$title</title>
+
+  $style
+</head>
+<body>
+<h2>$title</h2>
+<table>
+<tr>$headCells</tr>
+
+    $rowsHtml
+</table>
+</body>
+</html>
+
+"@
+
+                    return $html
+
+                }
+ 
+                function Ensure-Dir($path) {
+
+                    if (!(Test-Path $path)) {
+
+                        New-Item -ItemType Directory -Path $path | Out-Null
+
                     }
+
                 }
+
+                #endregion
+ 
+                $ErrorActionPreference = "Stop"
+
+                $reportDir = "$env:REPORT_DIR"
+
+                Ensure-Dir $reportDir
+ 
+                # --- Semgrep HTML ---
+
+                try {
+
+                    $semgrepJsonPath = Join-Path $reportDir "semgrep-report.json"
+
+                    if (Test-Path $semgrepJsonPath) {
+
+                        $sem = Get-Content $semgrepJsonPath -Raw | ConvertFrom-Json
+
+                        $results = @()
+
+                        if ($sem -and ($sem.PSObject.Properties.Name -contains 'results') -and $sem.results) {
+
+                            $results = $sem.results
+
+                        }
+ 
+                        $rows = @()
+
+                        $crit=0;$high=0;$med=0;$low=0
+ 
+                        foreach ($r in $results) {
+
+                            $rule     = $r.check_id
+
+                            $sev      = $r.extra.severity
+
+                            $file     = $r.path
+
+                            $line     = $r.start.line
+
+                            $msg      = $r.extra.message
+
+                            $meta     = if ($r.extra.metadata) { $r.extra.metadata | ConvertTo-Json -Compress } else { "" }
+
+                            $fix      = $r.extra.fix
+ 
+                            switch ($sev) {
+
+                                "CRITICAL" { $crit++ }
+
+                                "HIGH"     { $high++ }
+
+                                "MEDIUM"   { $med++ }
+
+                                "LOW"      { $low++ }
+
+                            }
+ 
+                            $cls = "sev-$sev"
+
+                            $rows += "<tr class=""$cls""><td>{0}</td><td>{1}</td><td>{2}</td><td class=""muted"">{3}</td><td>{4}</td><td class=""muted"">{5}</td></tr>" -f `
+
+                                (HtmlEncode $rule), (HtmlEncode $sev), (HtmlEncode $file), (HtmlEncode $line), (HtmlEncode $msg), (HtmlEncode $meta)
+ 
+                            if ($fix) {
+
+                                $rows += "<tr class=""$cls""><td colspan=""6""><strong>Fix:</strong><br><pre>{0}</pre></td></tr>" -f (HtmlEncode $fix)
+
+                            }
+
+                        }
+ 
+$summary = "<p><strong>Total:</strong> $($results.Count) &nbsp; | &nbsp; <strong>Critical:</strong> $crit &nbsp; <strong>High:</strong> $high &nbsp; <strong>Medium:</strong> $med &nbsp; <strong>Low:</strong> $low</p>"
+
+                        $rowsHtml = $summary + ($rows -join "`n")
+
+                        $headers = @("Rule", "Severity", "File", "Line", "Message", "Metadata")
+
+                        $html = Write-Table $headers $rowsHtml "Semgrep Findings"
+
+                        Set-Content (Join-Path $reportDir "semgrep-report.html") -Value $html -Encoding UTF8
+
+                    }
+
+                } catch {
+
+                    Write-Host "Semgrep HTML generation failed: $($_.Exception.Message)"
+
+                }
+ 
+                # --- Trivy HTML ---
+
+                try {
+
+                    $trivyJsonPath = Join-Path $reportDir "trivy-report.json"
+
+                    if (Test-Path $trivyJsonPath) {
+
+                        $trivy = Get-Content $trivyJsonPath -Raw | ConvertFrom-Json
+
+                        $rows = @()
+
+                        $crit=0;$high=0;$med=0;$low=0
+
+                        $total=0
+ 
+                        if ($trivy -and $trivy.Results) {
+
+                            foreach ($result in $trivy.Results) {
+
+                                if ($null -ne $result.Vulnerabilities) {
+
+                                    foreach ($v in $result.Vulnerabilities) {
+
+                                        $total++
+
+                                        $sev = $v.Severity
+
+                                        switch ($sev) {
+
+                                            "CRITICAL" { $crit++ }
+
+                                            "HIGH"     { $high++ }
+
+                                            "MEDIUM"   { $med++ }
+
+                                            "LOW"      { $low++ }
+
+                                        }
+
+                                        $rows += "<tr class=""sev-$sev""><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td class=""muted"">{4}</td><td class=""muted"">{5}</td><td class=""muted"">{6}</td></tr>" -f `
+
+                                            (HtmlEncode $result.Target),
+
+                                            (HtmlEncode $v.VulnerabilityID),
+
+                                            (HtmlEncode $v.PkgName),
+
+                                            (HtmlEncode $sev),
+
+                                            (HtmlEncode $v.InstalledVersion),
+
+                                            (HtmlEncode $v.FixedVersion),
+
+                                            (HtmlEncode $v.Title)
+
+                                        if ($v.Description) {
+
+                                            $rows += "<tr class=""sev-$sev""><td colspan=""7""><strong>Description:</strong><br><pre>{0}</pre></td></tr>" -f (HtmlEncode $v.Description)
+
+                                        }
+
+                                        if ($v.References) {
+
+                                            $refs = ($v.References | ForEach-Object { "<li>{0}</li>" -f (HtmlEncode $_) }) -join ""
+
+                                            $rows += "<tr class=""sev-$sev""><td colspan=""7""><strong>References:</strong><ul>$refs</ul></td></tr>"
+
+                                        }
+
+                                    }
+
+                                }
+
+                            }
+
+                        }
+ 
+                        $summary = "<p><strong>Total:</strong> $total &nbsp; | &nbsp; <strong>Critical:</strong> $crit &nbsp; <strong>High:</strong> $high &nbsp; <strong>Medium:</strong> $med &nbsp; <strong>Low:</strong> $low</p>"
+
+                        $rowsHtml = $summary + ($rows -join "`n")
+
+                        $headers = @("Target", "Vulnerability ID", "Package", "Severity", "Installed", "Fixed", "Title")
+
+                        $html = Write-Table $headers $rowsHtml "Trivy Vulnerabilities"
+
+                        Set-Content (Join-Path $reportDir "trivy-report.html") -Value $html -Encoding UTF8
+
+                    }
+
+                } catch {
+
+                    Write-Host "Trivy HTML generation failed: $($_.Exception.Message)"
+
+                }
+ 
+                # --- Gitleaks HTML ---
+
+                try {
+
+                    $glJsonPath = Join-Path $reportDir "gitleaks-report.json"
+
+                    if (Test-Path $glJsonPath) {
+
+                        $gl = Get-Content $glJsonPath -Raw | ConvertFrom-Json
+
+                        # Support both formats: object with `leaks` or raw array
+
+                        if ($gl -is [System.Collections.IEnumerable] -and -not ($gl.PSObject.Properties.Name -contains 'leaks')) {
+
+                            $leaks = $gl
+
+                        } else {
+
+                            $leaks = $gl.leaks
+
+                        }
+
+                        if (-not $leaks) { $leaks = @() }
+ 
+                        $rows = @()
+
+                        $count = 0
+
+                        foreach ($r in $leaks) {
+
+                            $count++
+
+                            $desc  = $r.Description
+
+                            $file  = $r.File
+
+                            $line  = $r.StartLine
+
+                            $rule  = $r.RuleID
+
+                            $repo  = $r.Repo
+
+                            $match = $r.Match
+
+                            $author= $r.Author
+
+                            $commit= $r.Commit
+
+                            $date  = $r.Date
+
+                            $rows += "<tr><td>{0}</td><td>{1}</td><td class=""muted"">{2}</td><td>{3}</td><td class=""muted"">{4}</td></tr>" -f `
+
+                                (HtmlEncode $desc), (HtmlEncode $file), (HtmlEncode $line), (HtmlEncode $rule), (HtmlEncode $repo)
+
+                            if ($match) {
+
+                                $rows += "<tr><td colspan=""5""><strong>Matched String (redacted):</strong><br><pre>{0}</pre></td></tr>" -f (HtmlEncode $match)
+
+                            }
+
+                            if ($commit -or $author -or $date) {
+
+                                $rows += "<tr><td colspan=""5""><strong>Git:</strong> Commit={0} &nbsp; Author={1} &nbsp; Date={2}</td></tr>" -f `
+
+                                    (HtmlEncode $commit), (HtmlEncode $author), (HtmlEncode $date)
+
+                            }
+
+                        }
+
+                        $summary = "<p><strong>Total Findings:</strong> $count</p>"
+
+                        $rowsHtml = $summary + ($rows -join "`n")
+
+                        $headers = @("Description", "File", "Line", "Rule", "Repo")
+
+                        $html = Write-Table $headers $rowsHtml "Gitleaks Findings"
+
+                        Set-Content (Join-Path $reportDir "gitleaks-report.html") -Value $html -Encoding UTF8
+
+                    }
+
+                } catch {
+
+                    Write-Host "Gitleaks HTML generation failed: $($_.Exception.Message)"
+
+                }
+
+                '''
+
             }
+
         }
 
-        stage('Acknowledge to Jira') {
-            steps {
-                script {
-                    def jiraComment = "Request received by Jenkins for deployment.\\n" +
-                                      "Star System: ${params.starSystem}\\n" +
-                                      "Planet: ${params.planet}\\n" +
-                                      "Branch: ${params.branch}\\n" +
-                                      "Request Date: ${params.requestDate}"
 
-                    sh """
-                    curl -X POST \
-                    -u JENKINSUSER:${JENKINSAPITOKEN} \
-                    -H "Content-Type: application/json" \
-                    --data '{ "body": "${jiraComment}" }' \
-                    https://yourcompany.atlassian.net/rest/api/3/issue/${params.jiraKey}/comment
-                    """
-                }
-            }
-        }
+stage('Publish Reports') {
 
-        stage('Call Deployer API - Create Record') {
-            steps {
-                script {
-                    echo "Calling Deployer API with StarSystem: ${params.starSystem}, Planet: ${params.planet}"
-                    // Placeholder - Will be completed during Phase 4
-                }
-            }
-        }
+      steps {
+
+        archiveArtifacts(
+
+          artifacts: "${env.REPORT_DIR}/*.json,${env.REPORT_DIR}/*.html",
+
+          fingerprint: true,
+
+          onlyIfSuccessful: false
+
+        )
+
+        publishHTML(target: [
+
+          reportDir: "${env.REPORT_DIR}",
+
+          reportFiles: "semgrep-report.html,trivy-report.html,gitleaks-report.html",
+
+          reportName: "Security Scan Reports",
+
+          keepAll: true,
+
+          alwaysLinkToLastBuild: true,
+
+          allowMissing: true
+
+        ])
+
+      }
+
     }
 
-    post {
-        success {
-            echo "Jira webhook processed successfully."
-        }
-        failure {
-            echo "Failed to process Jira webhook."
-        }
+ 
+stage('Upload Reports to Azure Storage (Azure Key Vault)') {
+ 
+  steps {
+ 
+    withAzureKeyvault(
+ 
+      azureKeyVaultSecrets: [
+ 
+        [
+ 
+          secretType: 'Secret',
+ 
+          name: 'JenkinsStorageAccount1',
+ 
+          envVariable: 'AZURE_STORAGE_KEY'
+ 
+        ]
+ 
+      ],
+ 
+      keyVaultURLOverride: 'https://AZRD-KV-DVO1.vault.azure.net'
+ 
+    ) {
+ 
+      bat '''
+ 
+        echo ===============================
+ 
+        echo Uploading reports to Azure Blob
+ 
+        echo ===============================
+
+        if "%AZURE_STORAGE_KEY%"=="" (
+ 
+          echo Storage key not injected from Key Vault
+ 
+          exit 1
+ 
+        )
+
+        az storage blob upload-batch --account-name azrd0st0jnk1 --account-key "%AZURE_STORAGE_KEY%" --destination "jnk-data01/%JOB_NAME%/%BUILD_NUMBER%" --source "reports" --overwrite
+ 
+      '''
+ 
     }
+ 
+  }
+ 
 }
+
+    stage('Security Quality Gate') {
+
+      steps {
+
+        script {
+
+          def semgrepCount = 0
+
+          def trivyCount   = 0
+
+          def gitleaksCount = 0
+ 
+          if (fileExists("${env.REPORT_DIR}/semgrep-report.json")) {
+
+            def sg = readJSON(file: "${env.REPORT_DIR}/semgrep-report.json")
+
+            // Semgrep JSON commonly has "results" list; guard nulls
+
+            semgrepCount = (sg?.results instanceof List) ? sg.results.size() : (sg?.results?.size() ?: 0)
+
+          }
+ 
+          if (fileExists("${env.REPORT_DIR}/trivy-report.json")) {
+
+            def trivy = readJSON(file: "${env.REPORT_DIR}/trivy-report.json")
+
+            trivy?.Results?.each { r ->
+
+              trivyCount += (r?.Vulnerabilities instanceof List) ? r.Vulnerabilities.size() : (r?.Vulnerabilities?.size() ?: 0)
+
+            }
+
+          }
+ 
+          if (fileExists("${env.REPORT_DIR}/gitleaks-report.json")) {
+
+            def gl = readJSON(file: "${env.REPORT_DIR}/gitleaks-report.json")
+
+            // Gitleaks can be array or object with "leaks"
+
+            if (gl instanceof List) {
+
+              gitleaksCount = gl.size()
+
+            } else {
+
+              gitleaksCount = (gl?.leaks instanceof List) ? gl.leaks.size() : (gl?.leaks?.size() ?: 0)
+
+            }
+
+          }
+ 
+          env.SEMGREP_COUNT  = semgrepCount.toString()
+
+          env.TRIVY_COUNT    = trivyCount.toString()
+
+          env.GITLEAKS_COUNT = gitleaksCount.toString()
+ 
+          echo "Security Scan Summary"
+
+          echo "Semgrep findings: ${env.SEMGREP_COUNT}"
+
+          echo "Trivy vulnerabilities: ${env.TRIVY_COUNT}"
+
+          echo "Gitleaks secrets: ${env.GITLEAKS_COUNT}"
+ 
+          if (semgrepCount > 0 || trivyCount > 0 || gitleaksCount > 0) {
+
+            error("SECURITY QUALITY GATE FAILED")
+
+          } else {
+
+            echo "SECURITY QUALITY GATE PASSED"
+
+          }
+
+        }
+
+      }
+
+    }
+
+  }
+ 
+post {
+
+  success {
+
+    script {
+
+      withCredentials([
+
+        string(credentialsId: 'NOTIFICATION_EMAILS', variable: 'NOTIFICATION_EMAILS')
+
+      ]) {
+
+        if (!env.NOTIFICATION_EMAILS?.trim()) {
+
+          echo "NOTIFICATION_EMAILS credential is empty. Skipping SUCCESS email."
+
+          return
+
+        }
+
+        try {
+
+          emailext(
+
+            subject: "Build SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+
+            mimeType: 'text/html',
+
+            to: env.NOTIFICATION_EMAILS,
+
+            body: """<html><body>
+<h3 style="color:green;">All security scans passed and reports uploaded successfully.</h3>
+<p><b>Scan Summary:</b></p>
+<ul>
+<li>Semgrep findings: ${env.SEMGREP_COUNT}</li>
+<li>Trivy vulnerabilities: ${env.TRIVY_COUNT}</li>
+<li>Gitleaks secrets: ${env.GITLEAKS_COUNT}</li>
+</ul>
+<hr>
+<h2 style="color:green;">Jenkins Build Details</h2>
+<table border="1" cellpadding="5">
+<tr><th>Name</th><th>Value</th></tr>
+<tr><td>Build Number</td><td>${env.BUILD_NUMBER}</td></tr>
+<tr><td>Job Name</td><td>${env.JOB_NAME}</td></tr>
+<tr><td>Build Status</td><td style="color:green;"><b>SUCCESS</b></td></tr>
+<tr>
+<td>Build URL</td>
+<td>
+<a href="${env.BUILD_URL}" target="_blank">
+
+      Open Jenkins Build
+</a>
+</td>
+</tr>
+<tr><td>Branch</td><td>${env.GIT_BRANCH}</td></tr>
+<tr>
+<td>Console</td>
+<td>
+<a href="${env.BUILD_URL}console" target="_blank">
+
+      View Console Logs
+</a>
+</td>
+</tr>
+</table>
+</body></html>"""
+
+          )
+
+        } catch (e) {
+
+          echo "SUCCESS email failed: ${e.getMessage()}"
+
+        }
+
+      }
+
+    }
+
+  }
+
+  failure {
+
+    script {
+
+      withCredentials([
+
+        string(credentialsId: 'NOTIFICATION_EMAILS', variable: 'NOTIFICATION_EMAILS')
+
+      ]) {
+
+        if (!env.NOTIFICATION_EMAILS?.trim()) {
+
+          echo "NOTIFICATION_EMAILS credential is empty. Skipping FAILURE email."
+
+          return
+
+        }
+
+        try {
+
+          emailext(
+
+            subject: "Build FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+
+            mimeType: 'text/html',
+
+            to: env.NOTIFICATION_EMAILS,
+
+            body: """<html><body>
+<h3 style="color:red;">Security Scan Failure Summary</h3>
+<p>The pipeline failed due to Security Quality Gate violations.</p>
+<p><b>Findings:</b></p>
+<ul>
+<li>Semgrep findings: ${env.SEMGREP_COUNT}</li>
+<li>Trivy vulnerabilities: ${env.TRIVY_COUNT}</li>
+<li>Gitleaks secrets detected: ${env.GITLEAKS_COUNT}</li>
+</ul>
+<p><b>Next Step:</b> Fix issues in the PR branch and re-trigger the pipeline.</p>
+<hr>
+<h2 style="color:red;">Jenkins Build Details</h2>
+<table border="1" cellpadding="5">
+<tr><th>Name</th><th>Value</th></tr>
+<tr><td>Build Number</td><td>${env.BUILD_NUMBER}</td></tr>
+<tr><td>Job Name</td><td>${env.JOB_NAME}</td></tr>
+<tr><td>Build Status</td><td style="color:red;"><b>FAILURE</b></td></tr>
+<tr>
+<td>Build URL</td>
+<td>
+<a href="${env.BUILD_URL}" target="_blank">
+
+      Open Jenkins Build
+</a>
+</td>
+</tr>
+<tr><td>Branch</td><td>${env.GIT_BRANCH}</td></tr>
+<tr>
+<td>Console</td>
+<td>
+<a href="${env.BUILD_URL}console" target="_blank">
+
+      View Console Logs
+</a>
+</td>
+</tr>
+</table>
+<p><b>Pipeline Status:</b> Blocked by Security Quality Gate</p>
+</body></html>"""
+
+          )
+
+        } catch (e) {
+
+          echo "FAILURE email failed: ${e.getMessage()}"
+
+        }
+
+      }
+
+    }
+
+  }
+
+}
+
+}
+ 
+pipeline {
+
+    agent any
+
+	environment {
+
+    JIRA_URL        = "https://redrivermutual.atlassian.net"
+
+    JIRA_CRED       = "Jira-api-token-vanand"
+ 
+    PROJECT_KEY     = "GWCP"
+
+    DATETIME_FIELD  = "customfield_11020"
+
+    BC_DEPLOY_JOB   = "GW-Billing-Center-Deploy"
+
+    CC_DEPLOY_JOB   = "GW-Claim-Center-Deploy"
+
+    PC_DEPLOY_JOB   = "GW-Policy-Center-Deploy"
+
+    CM_DEPLOY_JOB   = "GW-Contact-Manager-Deploy"
+
+    DEPLOY_ALL      = "GW-Deploy-All"
+
+  }
+ 
+    // Define parameters at the pipeline level so they are available immediately
+
+    parameters {
+
+        string(name: 'ISSUE_KEY', defaultValue: '', description: 'Jira Issue Key')
+
+        //string(name: 'DeployLatestBranch', defaultValue: '', description: 'Latest Build deploy')
+
+        //string(name: 'GWCPplanet', defaultValue: '', description: 'Planet')
+
+        //string(name: 'GWCPDeploymentDateTime', defaultValue: '', description: 'Deployment DateTime')
+
+        //string(name: 'GWCPstarsystem', defaultValue: '', description: 'Star System')
+
+        //string(name: 'GWCPbranch', defaultValue: '', description: 'Branch Name')
+
+        //string(name: 'CMbuild', defaultValue: '', description: 'CM Build')
+
+        //string(name: 'BCbuild', defaultValue: '', description: 'BC Build')
+
+        //string(name: 'PCbuild', defaultValue: '', description: 'PC Build')
+
+       // string(name: 'CCbuild', defaultValue: '', description: 'CC Build')
+
+    }
+ 
+    stages {
+
+        stage('Print Incoming Values') {
+
+            steps {
+
+         script {        
+
+		  def raw = readJSON text: params.ISSUE_KEY
+
+		  def issueKey = raw.ISSUE_KEY?.trim()
+
+          def envName  = raw.GWCPplanet?.trim()
+
+          def rawDate  = raw.GWCPDeploymentDateTime?.trim()
+ 
+          echo """
+
+Issue Key  : ${issueKey}
+
+Environment: ${envName}
+
+Deploy Time: ${rawDate}
+
+"""
+ 
+          if (!issueKey || !envName || !rawDate || !raw) {
+
+            error "❌ Missing required Jira parameters"
+
+          }
+
+        def fixed  = rawDate.replaceFirst(/ (\d{4})$/, '+$1') // normalizeOffset(rawDate)                         // "2026-01-10T19:00:00.000+0000"
+
+        def fmt    = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ")
+
+        def date   = fmt.parse(fixed)                               // java.util.Date
+
+        // Convert back to a string with the same pattern
+
+        def output = fmt.format(date)
+
+        echo "RAW_DATE: ${output}"
+ 
+          env.ISSUE_KEY  = issueKey
+
+          env.TARGET_ENV = envName
+
+          env.RAW_DATE   = output
+
+		  env.PC_BUILD   = raw.PCbuild
+
+		  env.CC_BUILD   = raw.CCbuild
+
+		  env.BC_BUILD   = raw.BCbuild
+
+		  env.CM_BUILD   = raw.CMbuild
+
+		  env.STAR       = raw.GWCPstarsystem
+
+		  env.BRANCH     =  raw.GWCPbranch
+
+		  env.DEPLOY_LATEST_BRANCH = raw.DeployLatestBranch 
+
+         }
+
+            }
+
+        }
+
+    	    /* ============================
+
+       Parse & Normalize Date (UTC via PowerShell)
+
+       -> PARSED_TIME_MS (epoch ms UTC), JQL_TIME ("yyyy-MM-dd HH:mm" UTC)
+
+    ============================ */
+
+    stage('Parse & Normalize Date (UTC via PowerShell)') {
+
+      steps {
+
+        script {
+
+          def psOut = powershell(returnStdout: true, script: '''
+
+$raw = $env:RAW_DATE
+ 
+# Normalize offsets like +0000 -> +00:00 ; +0530 -> +05:30
+
+$normalized = [Regex]::Replace($raw, "([\\+\\-]\\d{2})(\\d{2})$", '$1:$2')
+ 
+# Parse as DateTimeOffset (handles ISO-8601 with offset/Z)
+
+try {
+
+    $dto = [DateTimeOffset]::Parse($normalized)
+
+}
+
+catch {
+
+    try {
+
+        $dt  = [DateTime]::Parse($normalized)
+
+        $dto = New-Object System.DateTimeOffset ($dt.ToUniversalTime())
+
+    }
+
+    catch {
+
+        $err = @{ error = "Unable to parse date"; raw = $raw } | ConvertTo-Json -Compress
+
+        Write-Output $err
+
+        exit 1
+
+    }
+
+}
+ 
+# Target epoch ms (UTC)
+
+$epochMs = $dto.ToUnixTimeMilliseconds()
+ 
+# JQL fuzzy time in UTC "yyyy-MM-dd HH:mm"
+
+$jqlTime = $dto.UtcDateTime.ToString("yyyy-MM-dd HH:mm")
+ 
+@{
+
+  PARSED_TIME_MS = "$epochMs"
+
+  JQL_TIME       = "$jqlTime"
+
+} | ConvertTo-Json -Compress
+
+''')
+ 
+          def parsedJson = readJSON text: psOut
+
+          if (parsedJson?.error) {
+
+            error "❌ ${parsedJson.error}: ${parsedJson.raw}"
+
+          }
+ 
+          env.PARSED_TIME_MS = parsedJson.PARSED_TIME_MS.toString()
+
+          env.JQL_TIME       = parsedJson.JQL_TIME.toString()
+ 
+          echo "✅ Parsed time (ms UTC) = ${env.PARSED_TIME_MS}"
+
+          echo "✅ JQL_TIME (UTC)       = ${env.JQL_TIME}"
+
+        }
+
+      }
+
+    }
+ 
+    /* ============================
+
+       Check Conflicts in Jira (new endpoint)
+
+    ============================ */
+
+    stage('Check Conflicts in Jira') {
+
+      steps {
+
+        script {
+
+          // NOTE: This matches same-time deployments; adjust as needed.
+
+          def jql = """
+
+project = ${PROJECT_KEY}
+
+AND ${DATETIME_FIELD} ~ "${env.JQL_TIME}" 
+
+""".trim()
+ 
+          echo "🔍 JQL = ${jql}"
+ 
+          def encoded = java.net.URLEncoder.encode(jql, "UTF-8")
+
+          // ✅ New endpoint (old /search is removed in Jira Cloud)
+
+          def url = "${env.JIRA_URL}/rest/api/3/search/jql?jql=${encoded}"
+ 
+          def resp = httpRequest(
+
+            url: url,
+
+            httpMode: 'GET',
+
+            authentication: env.JIRA_CRED,
+
+            validResponseCodes: '200'
+
+          )
+ 
+          def result   = readJSON text: resp.content
+
+          def issues   = (result?.issues ?: [])
+
+          env.CONFLICT = (issues.size() > 1).toString()   // treat >=2 as conflict (includes current)
+
+          echo "🔎 Conflict found = ${env.CONFLICT} (matches=${issues.size()})"
+
+        }
+
+      }
+
+    }
+ 
+
+
+    /* ============================
+
+       Comment Back to Jira
+
+    ============================ */
+
+    stage('Comment Back to Jira') {
+
+      steps {
+
+        script {
+
+          def msg = (env.CONFLICT == "true")
+
+            ? "❌ Deployment conflict detected. Another deployment exists at the same time."
+
+            : "✅ Deployment validated. Jenkins will execute at the scheduled time."
+ 
+          def body = """
+
+{
+
+  "body": {
+
+    "type": "doc",
+
+    "version": 1,
+
+    "content": [{
+
+      "type": "paragraph",
+
+      "content": [{
+
+        "type": "text",
+
+        "text": "${msg}"
+
+      }]
+
+    }]
+
+  }
+
+}
+
+"""
+ 
+          httpRequest(
+
+            url: "${env.JIRA_URL}/rest/api/3/issue/${env.ISSUE_KEY}/comment",
+
+            httpMode: 'POST',
+
+            authentication: 'Jira-api-token-vanand',
+
+            contentType: 'APPLICATION_JSON',
+
+            requestBody: body,
+
+            validResponseCodes: '200:299'
+
+          )
+
+        }
+
+      }
+
+    }
+ 
+    /* ============================
+
+       Schedule Deploy Pipeline (NO AGENT BLOCK)
+
+       - UTC delay calculation via PowerShell → JSON
+
+       - Optional Jira↔Jenkins clock-skew correction
+
+    ============================ */
+
+stage('Schedule Deploy Pipeline (NO AGENT BLOCK)') {
+
+  when {
+
+    expression { env.CONFLICT == "false" }
+
+  }
+
+  steps {
+
+	script {
+
+      // 1) Compute delay purely in UTC on the Windows agent (PowerShell → JSON)
+
+	  if(env.DEPLOY_LATEST_BRANCH == 'Yes') 
+
+	  {
+
+		def delayJson = powershell(returnStdout: true, script: '''
+
+$targetMs     = [int64]$env:PARSED_TIME_MS
+
+$jenkinsNowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+ 
+# Safety buffer — seconds
+
+$safetyBufferSec = 5
+ 
+# Difference in seconds (floor to avoid fractional)
+
+$deltaSec = [math]::Floor( ($targetMs - $jenkinsNowMs) / 1000 )
+ 
+# Apply safety buffer and clamp
+
+$correctedDelaySec = $deltaSec - $safetyBufferSec
+
+if ($correctedDelaySec -lt 0) { $correctedDelaySec = 0 }
+ 
+@{
+
+  TARGET_MS           = "$targetMs"
+
+  JENKINS_NOW_MS      = "$jenkinsNowMs"
+
+  DELTA_SEC           = "$deltaSec"
+
+  CORRECTED_DELAY_SEC = "$correctedDelaySec"
+
+} | ConvertTo-Json -Compress
+
+''')
+ 
+      def delayObj = readJSON text: delayJson
+
+      def correctedDelaySec = delayObj.CORRECTED_DELAY_SEC.toInteger()
+ 
+      // 2) Optional clock skew correction using Jira 'Date' header (RFC‑1123)
+
+      def probe = httpRequest(
+
+        url: "${env.JIRA_URL}/rest/api/3/search/jql?jql=project%3D${env.PROJECT_KEY}&maxResults=1&fields=key",
+
+        httpMode: 'GET',
+
+        authentication: env.JIRA_CRED,
+
+        validResponseCodes: '200'
+
+      )
+ 
+      def jiraDateHeader = probe.headers?.get('Date') ?: probe.headers?.get('date')
+
+      if (jiraDateHeader instanceof java.util.List && !jiraDateHeader.isEmpty()) {
+
+        jiraDateHeader = jiraDateHeader[0]
+
+      }
+ 
+      if (jiraDateHeader) {
+
+        def skewJson = powershell(returnStdout: true, script: """
+
+\$jenkinsNowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+
+\$jiraNowMs    = ([DateTimeOffset]::ParseExact('${jiraDateHeader}', 'r', [Globalization.CultureInfo]::InvariantCulture)).ToUnixTimeMilliseconds()
+
+\$clockSkewMs  = (\$jiraNowMs - \$jenkinsNowMs)
+
+@{ CLOCK_SKEW_MS = \"\$clockSkewMs\" } | ConvertTo-Json -Compress
+
+""")
+
+        def skewObj = readJSON text: skewJson
+
+        def skewMs = (skewObj?.CLOCK_SKEW_MS ?: "0").toLong()
+
+        correctedDelaySec = correctedDelaySec - (skewMs / 1000).intValue()
+
+      }
+ 
+      if (correctedDelaySec < 0) correctedDelaySec = 0
+ 
+      echo "📏 Target (ms UTC): ${delayObj.TARGET_MS}"
+
+      echo "🕒 Jenkins now (ms UTC): ${delayObj.JENKINS_NOW_MS}"
+
+      echo "⏳ Raw delta (sec): ${delayObj.DELTA_SEC}"
+
+      echo "✅ Corrected delay (sec): ${correctedDelaySec}"
+ 
+      // 3) Trigger downstream job with quietPeriod = correctedDelaySec
+
+      echo "Deploy ALL Scheduling JOB"          
+
+      build job: env.DEPLOY_ALL,
+
+        quietPeriod: correctedDelaySec,
+
+        wait: false,
+
+        parameters: [
+
+          string(name: 'ISSUE_KEY',       value: env.ISSUE_KEY),
+
+          string(name: 'TARGET_ENV',      value: env.TARGET_ENV),
+
+          string(name: 'DEPLOY_DATETIME', value: env.RAW_DATE),
+
+          string(name: 'RAW',           value: env.BC_BUILD),
+
+          string(name: 'STAR_SYSTEM',   value: env.STAR ),
+
+          string(name: 'BRANCH',   value: env.BRANCH ),
+
+          string(name: 'DEPLOY_LATEST_BRANCH',   value: env.DEPLOY_LATEST_BRANCH )
+
+        ]
+
+	  }
+
+    }
+
+    script {
+
+      // 1) Compute delay purely in UTC on the Windows agent (PowerShell → JSON)
+
+	  if(env.CM_BUILD ) 
+
+	  {
+
+		def delayJson = powershell(returnStdout: true, script: '''
+
+$targetMs     = [int64]$env:PARSED_TIME_MS
+
+$jenkinsNowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+ 
+# Safety buffer — seconds
+
+$safetyBufferSec = 5
+ 
+# Difference in seconds (floor to avoid fractional)
+
+$deltaSec = [math]::Floor( ($targetMs - $jenkinsNowMs) / 1000 )
+ 
+# Apply safety buffer and clamp
+
+$correctedDelaySec = $deltaSec - $safetyBufferSec
+
+if ($correctedDelaySec -lt 0) { $correctedDelaySec = 0 }
+ 
+@{
+
+  TARGET_MS           = "$targetMs"
+
+  JENKINS_NOW_MS      = "$jenkinsNowMs"
+
+  DELTA_SEC           = "$deltaSec"
+
+  CORRECTED_DELAY_SEC = "$correctedDelaySec"
+
+} | ConvertTo-Json -Compress
+
+''')
+
+ 
+   def delayObj = readJSON text: delayJson
+
+      def correctedDelaySec = delayObj.CORRECTED_DELAY_SEC.toInteger()
+ 
+      // 2) Optional clock skew correction using Jira 'Date' header (RFC‑1123)
+
+      def probe = httpRequest(
+
+        url: "${env.JIRA_URL}/rest/api/3/search/jql?jql=project%3D${env.PROJECT_KEY}&maxResults=1&fields=key",
+
+        httpMode: 'GET',
+
+        authentication: env.JIRA_CRED,
+
+        validResponseCodes: '200'
+
+      )
+ 
+      def jiraDateHeader = probe.headers?.get('Date') ?: probe.headers?.get('date')
+
+      if (jiraDateHeader instanceof java.util.List && !jiraDateHeader.isEmpty()) {
+
+        jiraDateHeader = jiraDateHeader[0]
+
+      }
+ 
+      if (jiraDateHeader) {
+
+        def skewJson = powershell(returnStdout: true, script: """
+
+\$jenkinsNowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+
+\$jiraNowMs    = ([DateTimeOffset]::ParseExact('${jiraDateHeader}', 'r', [Globalization.CultureInfo]::InvariantCulture)).ToUnixTimeMilliseconds()
+
+\$clockSkewMs  = (\$jiraNowMs - \$jenkinsNowMs)
+
+@{ CLOCK_SKEW_MS = \"\$clockSkewMs\" } | ConvertTo-Json -Compress
+
+""")
+
+        def skewObj = readJSON text: skewJson
+
+        def skewMs = (skewObj?.CLOCK_SKEW_MS ?: "0").toLong()
+
+        correctedDelaySec = correctedDelaySec - (skewMs / 1000).intValue()
+
+      }
+ 
+      if (correctedDelaySec < 0) correctedDelaySec = 0
+ 
+      echo "📏 Target (ms UTC): ${delayObj.TARGET_MS}"
+
+      echo "🕒 Jenkins now (ms UTC): ${delayObj.JENKINS_NOW_MS}"
+
+      echo "⏳ Raw delta (sec): ${delayObj.DELTA_SEC}"
+
+      echo "✅ Corrected delay (sec): ${correctedDelaySec}"
+ 
+      // 3) Trigger downstream job with quietPeriod = correctedDelaySec
+
+      echo "CM Scheduling JOB"          
+
+      build job: env.CM_DEPLOY_JOB,
+
+        quietPeriod: correctedDelaySec,
+
+        wait: false,
+
+        parameters: [
+
+          string(name: 'ISSUE_KEY',       value: env.ISSUE_KEY),
+
+          string(name: 'TARGET_ENV',      value: env.TARGET_ENV),
+
+          string(name: 'DEPLOY_DATETIME', value: env.RAW_DATE),
+
+          string(name: 'RAW',           value: env.CM_BUILD),
+
+          string(name: 'STAR_SYSTEM',   value: env.STAR ),
+
+          string(name: 'BRANCH',   value: env.BRANCH ),
+
+          string(name: 'DEPLOY_LATEST_BRANCH',   value: env.DEPLOY_LATEST_BRANCH )
+
+        ]
+
+	  }
+
+    }
+
+    script {
+
+      // 1) Compute delay purely in UTC on the Windows agent (PowerShell → JSON)
+
+	  if(env.BC_BUILD ) 
+
+	  {
+
+		def delayJson = powershell(returnStdout: true, script: '''
+
+$targetMs     = [int64]$env:PARSED_TIME_MS
+
+$jenkinsNowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+ 
+# Safety buffer — seconds
+
+$safetyBufferSec = 5
+ 
+# Difference in seconds (floor to avoid fractional)
+
+$deltaSec = [math]::Floor( ($targetMs - $jenkinsNowMs) / 1000 )
+ 
+# Apply safety buffer and clamp
+
+$correctedDelaySec = $deltaSec - $safetyBufferSec
+
+if ($correctedDelaySec -lt 0) { $correctedDelaySec = 0 }
+ 
+@{
+
+  TARGET_MS           = "$targetMs"
+
+  JENKINS_NOW_MS      = "$jenkinsNowMs"
+
+  DELTA_SEC           = "$deltaSec"
+
+  CORRECTED_DELAY_SEC = "$correctedDelaySec"
+
+} | ConvertTo-Json -Compress
+
+''')
+ 
+      def delayObj = readJSON text: delayJson
+
+      def correctedDelaySec = delayObj.CORRECTED_DELAY_SEC.toInteger()
+ 
+      // 2) Optional clock skew correction using Jira 'Date' header (RFC‑1123)
+
+      def probe = httpRequest(
+
+        url: "${env.JIRA_URL}/rest/api/3/search/jql?jql=project%3D${env.PROJECT_KEY}&maxResults=1&fields=key",
+
+        httpMode: 'GET',
+
+        authentication: env.JIRA_CRED,
+
+        validResponseCodes: '200'
+
+      )
+ 
+      def jiraDateHeader = probe.headers?.get('Date') ?: probe.headers?.get('date')
+
+      if (jiraDateHeader instanceof java.util.List && !jiraDateHeader.isEmpty()) {
+
+        jiraDateHeader = jiraDateHeader[0]
+
+      }
+ 
+      if (jiraDateHeader) {
+
+        def skewJson = powershell(returnStdout: true, script: """
+
+\$jenkinsNowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+
+\$jiraNowMs    = ([DateTimeOffset]::ParseExact('${jiraDateHeader}', 'r', [Globalization.CultureInfo]::InvariantCulture)).ToUnixTimeMilliseconds()
+
+\$clockSkewMs  = (\$jiraNowMs - \$jenkinsNowMs)
+
+@{ CLOCK_SKEW_MS = \"\$clockSkewMs\" } | ConvertTo-Json -Compress
+
+""")
+
+        def skewObj = readJSON text: skewJson
+
+        def skewMs = (skewObj?.CLOCK_SKEW_MS ?: "0").toLong()
+
+        correctedDelaySec = correctedDelaySec - (skewMs / 1000).intValue()
+
+      }
+ 
+      if (correctedDelaySec < 0) correctedDelaySec = 0
+ 
+      echo "📏 Target (ms UTC): ${delayObj.TARGET_MS}"
+
+      echo "🕒 Jenkins now (ms UTC): ${delayObj.JENKINS_NOW_MS}"
+
+      echo "⏳ Raw delta (sec): ${delayObj.DELTA_SEC}"
+
+      echo "✅ Corrected delay (sec): ${correctedDelaySec}"
+ 
+      // 3) Trigger downstream job with quietPeriod = correctedDelaySec
+
+      echo "BC Scheduling JOB"          
+
+      build job: env.BC_DEPLOY_JOB,
+
+        quietPeriod: correctedDelaySec,
+
+        wait: false,
+
+        parameters: [
+
+          string(name: 'ISSUE_KEY',       value: env.ISSUE_KEY),
+
+          string(name: 'TARGET_ENV',      value: env.TARGET_ENV),
+
+          string(name: 'DEPLOY_DATETIME', value: env.RAW_DATE),
+
+          string(name: 'RAW',           value: env.BC_BUILD),
+
+          string(name: 'STAR_SYSTEM',   value: env.STAR ),
+
+          string(name: 'BRANCH',   value: env.BRANCH ),
+
+          string(name: 'DEPLOY_LATEST_BRANCH',   value: env.DEPLOY_LATEST_BRANCH )
+
+        ]
+
+	  }
+
+    }
+
+    script {
+
+      // 1) Compute delay purely in UTC on the Windows agent (PowerShell → JSON)
+
+	  if(env.PC_BUILD ) 
+
+	  {
+
+		def delayJson = powershell(returnStdout: true, script: '''
+
+$targetMs     = [int64]$env:PARSED_TIME_MS
+
+$jenkinsNowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+ 
+# Safety buffer — seconds
+
+$safetyBufferSec = 5
+ 
+# Difference in seconds (floor to avoid fractional)
+
+$deltaSec = [math]::Floor( ($targetMs - $jenkinsNowMs) / 1000 )
+ 
+# Apply safety buffer and clamp
+
+$correctedDelaySec = $deltaSec - $safetyBufferSec
+
+if ($correctedDelaySec -lt 0) { $correctedDelaySec = 0 }
+ 
+@{
+
+  TARGET_MS           = "$targetMs"
+
+  JENKINS_NOW_MS      = "$jenkinsNowMs"
+
+  DELTA_SEC           = "$deltaSec"
+
+  CORRECTED_DELAY_SEC = "$correctedDelaySec"
+
+} | ConvertTo-Json -Compress
+
+''')
+ 
+      def delayObj = readJSON text: delayJson
+
+      def correctedDelaySec = delayObj.CORRECTED_DELAY_SEC.toInteger()
+ 
+      // 2) Optional clock skew correction using Jira 'Date' header (RFC‑1123)
+
+      def probe = httpRequest(
+
+        url: "${env.JIRA_URL}/rest/api/3/search/jql?jql=project%3D${env.PROJECT_KEY}&maxResults=1&fields=key",
+
+        httpMode: 'GET',
+
+        authentication: env.JIRA_CRED,
+
+        validResponseCodes: '200'
+
+      )
+ 
+      def jiraDateHeader = probe.headers?.get('Date') ?: probe.headers?.get('date')
+
+      if (jiraDateHeader instanceof java.util.List && !jiraDateHeader.isEmpty()) {
+
+        jiraDateHeader = jiraDateHeader[0]
+
+      }
+
+ 
+
+
+      if (jiraDateHeader) {
+
+        def skewJson = powershell(returnStdout: true, script: """
+
+\$jenkinsNowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+
+\$jiraNowMs    = ([DateTimeOffset]::ParseExact('${jiraDateHeader}', 'r', [Globalization.CultureInfo]::InvariantCulture)).ToUnixTimeMilliseconds()
+
+\$clockSkewMs  = (\$jiraNowMs - \$jenkinsNowMs)
+
+@{ CLOCK_SKEW_MS = \"\$clockSkewMs\" } | ConvertTo-Json -Compress
+
+""")
+
+        def skewObj = readJSON text: skewJson
+
+        def skewMs = (skewObj?.CLOCK_SKEW_MS ?: "0").toLong()
+
+        correctedDelaySec = correctedDelaySec - (skewMs / 1000).intValue()
+
+      }
+ 
+      if (correctedDelaySec < 0) correctedDelaySec = 0
+ 
+      echo "📏 Target (ms UTC): ${delayObj.TARGET_MS}"
+
+      echo "🕒 Jenkins now (ms UTC): ${delayObj.JENKINS_NOW_MS}"
+
+      echo "⏳ Raw delta (sec): ${delayObj.DELTA_SEC}"
+
+      echo "✅ Corrected delay (sec): ${correctedDelaySec}"
+ 
+      // 3) Trigger downstream job with quietPeriod = correctedDelaySec
+
+      echo "PC Scheduling JOB"          
+
+      build job: env.PC_DEPLOY_JOB,
+
+        quietPeriod: correctedDelaySec,
+
+        wait: false,
+
+        parameters: [
+
+          string(name: 'ISSUE_KEY',       value: env.ISSUE_KEY),
+
+          string(name: 'TARGET_ENV',      value: env.TARGET_ENV),
+
+          string(name: 'DEPLOY_DATETIME', value: env.RAW_DATE),
+
+          string(name: 'RAW',           value: env.PC_BUILD),
+
+          string(name: 'STAR_SYSTEM',   value: env.STAR ),
+
+          string(name: 'BRANCH',   value: env.BRANCH ),
+
+          string(name: 'DEPLOY_LATEST_BRANCH',   value: env.DEPLOY_LATEST_BRANCH )
+
+        ]
+
+	  }
+
+    }
+
+    script {
+
+      // 1) Compute delay purely in UTC on the Windows agent (PowerShell → JSON)
+
+	  if(env.CC_BUILD) 
+
+	  {
+
+		def delayJson = powershell(returnStdout: true, script: '''
+
+$targetMs     = [int64]$env:PARSED_TIME_MS
+
+$jenkinsNowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+ 
+# Safety buffer — seconds
+
+$safetyBufferSec = 5
+ 
+# Difference in seconds (floor to avoid fractional)
+
+$deltaSec = [math]::Floor( ($targetMs - $jenkinsNowMs) / 1000 )
+ 
+# Apply safety buffer and clamp
+
+$correctedDelaySec = $deltaSec - $safetyBufferSec
+
+if ($correctedDelaySec -lt 0) { $correctedDelaySec = 0 }
+ 
+@{
+
+  TARGET_MS           = "$targetMs"
+
+  JENKINS_NOW_MS      = "$jenkinsNowMs"
+
+  DELTA_SEC           = "$deltaSec"
+
+  CORRECTED_DELAY_SEC = "$correctedDelaySec"
+
+} | ConvertTo-Json -Compress
+
+''')
+ 
+      def delayObj = readJSON text: delayJson
+
+      def correctedDelaySec = delayObj.CORRECTED_DELAY_SEC.toInteger()
+ 
+      // 2) Optional clock skew correction using Jira 'Date' header (RFC‑1123)
+
+      def probe = httpRequest(
+
+        url: "${env.JIRA_URL}/rest/api/3/search/jql?jql=project%3D${env.PROJECT_KEY}&maxResults=1&fields=key",
+
+        httpMode: 'GET',
+
+        authentication: env.JIRA_CRED,
+
+        validResponseCodes: '200'
+
+      )
+ 
+      def jiraDateHeader = probe.headers?.get('Date') ?: probe.headers?.get('date')
+
+      if (jiraDateHeader instanceof java.util.List && !jiraDateHeader.isEmpty()) {
+
+        jiraDateHeader = jiraDateHeader[0]
+
+      }
+ 
+      if (jiraDateHeader) {
+
+        def skewJson = powershell(returnStdout: true, script: """
+
+\$jenkinsNowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+
+\$jiraNowMs    = ([DateTimeOffset]::ParseExact('${jiraDateHeader}', 'r', [Globalization.CultureInfo]::InvariantCulture)).ToUnixTimeMilliseconds()
+
+\$clockSkewMs  = (\$jiraNowMs - \$jenkinsNowMs)
+
+@{ CLOCK_SKEW_MS = \"\$clockSkewMs\" } | ConvertTo-Json -Compress
+
+""")
+
+        def skewObj = readJSON text: skewJson
+
+        def skewMs = (skewObj?.CLOCK_SKEW_MS ?: "0").toLong()
+
+        correctedDelaySec = correctedDelaySec - (skewMs / 1000).intValue()
+
+      }
+ 
+      if (correctedDelaySec < 0) correctedDelaySec = 0
+ 
+      echo "📏 Target (ms UTC): ${delayObj.TARGET_MS}"
+
+      echo "🕒 Jenkins now (ms UTC): ${delayObj.JENKINS_NOW_MS}"
+
+      echo "⏳ Raw delta (sec): ${delayObj.DELTA_SEC}"
+
+      echo "✅ Corrected delay (sec): ${correctedDelaySec}"
+ 
+      // 3) Trigger downstream job with quietPeriod = correctedDelaySec
+
+      echo "CC Scheduling JOB"          
+
+      build job: env.CC_DEPLOY_JOB,
+
+        quietPeriod: correctedDelaySec,
+
+        wait: false,
+
+        parameters: [
+
+          string(name: 'ISSUE_KEY',       value: env.ISSUE_KEY),
+
+          string(name: 'TARGET_ENV',      value: env.TARGET_ENV),
+
+          string(name: 'DEPLOY_DATETIME', value: env.RAW_DATE),
+
+          string(name: 'RAW',           value: env.CC_BUILD),
+
+          string(name: 'STAR_SYSTEM',   value: env.STAR ),
+
+          string(name: 'BRANCH',   value: env.BRANCH ),
+
+          string(name: 'DEPLOY_LATEST_BRANCH',   value: env.DEPLOY_LATEST_BRANCH )
+
+        ]
+
+	  }
+
+    }
+
+  }
+
+}    
+
+}
+
+}
+
+ 
+import groovy.json.JsonSlurper
+
+import groovy.json.JsonOutput
+
+import java.time.LocalDateTime
+
+import java.time.format.DateTimeFormatter
+ 
+pipeline {
+
+  agent any
+ 
+  environment {
+
+    /* ---------------- Jira ---------------- */
+
+        JIRA_URL        = "https://redrivermutual.atlassian.net"
+
+        JIRA_CRED = 'Jira-api-token-vanand'
+
+        JIRA_DONE_TRANSITION = '21'
+
+        JIRA_OPEN_TRANSITION = '111'
+
+        PROJECT_KEY     = "GWCP"
+
+        DATETIME_FIELD  = "customfield_11020"
+
+        DEPLOY_JOB      = "GW-deployer"
+
+		TENANT = 'redrivrca'
+
+  }
+
+  parameters {
+
+          string(name: 'ISSUE_KEY',defaultValue: '',description:"")
+
+          string(name: 'TARGET_ENV',defaultValue: '',description:"")
+
+          string(name: 'DEPLOY_DATETIME',defaultValue: '',description:"")
+
+          string(name: 'RAW',defaultValue: '',description:"")
+
+          string(name: 'STAR_SYSTEM', defaultValue:'', description: 'GW star system (projectId)')
+
+          string(name: 'DEPLOY_LATEST_BRANCH',defaultValue: '',description:"")
+
+          string(name: 'BRANCH',defaultValue: '',description:"")
+
+    }
+ 
+  stages {
+
+      stage('Get Guidewire Token') {
+
+      steps {
+
+        script {
+
+        withAzureKeyvault(
+
+        azureKeyVaultSecrets: [
+
+        [secretType: 'Secret',name: 'GW-Client-ID',envVariable: 'CLIENT_ID'],
+
+        [secretType: 'Secret',name: 'GW-Client-Secret',envVariable: 'CLIENT_SECRET'],
+
+        [secretType: 'Secret',name: 'GW-TOKEN-URL',envVariable: 'TOKEN_URL']
+
+      ],
+
+      keyVaultURLOverride: 'https://AZRD-KV-DVO1.vault.azure.net'
+
+         ) {
+
+                    // Build form-encoded body safely
+
+            def enc = { s -> URLEncoder.encode(s, 'UTF-8') }
+
+            def formBody = [
+
+              grant_type   : "client_credentials",
+
+              client_id    : CLIENT_ID,
+
+              client_secret: CLIENT_SECRET,
+
+              scope        : "gcc.deployments.read gcc.deployments.write gcc.environments.read gcc.projects.read gcc.projects.write planet_class.lower project.gwcp project.gwcpdev project.gwcppre tenant.redrivrca cicd.insurerconfig.read cicd.insurerconfig.write cicd.metadata.read cicd.schedules.read cicd.schedules.write cicd.postdeploymenttests.read cicd.postdeploymenttests.write cicd.qualitygates.read cicd.qualitygates.write   "
+
+            ].collect { k, v -> "${k}=${enc(v)}" }.join('&')
+ 
+            def resp = httpRequest(
+
+              httpMode: 'POST',
+
+              url: TOKEN_URL,
+
+              //url: params.TOKEN_URL,
+
+              //contentType: 'APPLICATION_X_WWW_FORM_URLENCODED',
+
+              customHeaders: [[name: 'Content-Type', value: 'application/x-www-form-urlencoded']],
+
+              requestBody: formBody,
+
+              acceptType: 'APPLICATION_JSON',
+
+              validResponseCodes: '200:299',
+
+              // Avoid logging full response if it contains secrets
+
+              consoleLogResponseBody: false
+
+            )
+
+            echo "Token endpoint HTTP status: ${resp}"
+
+            // Parse JSON response
+
+           // def json = new JsonSlurper().parseText(resp.content)
+
+           def json = readJSON text: resp.content
+
+           if (!json?.access_token) {
+
+            error "No access_token found in response. Raw: ${resp.content.take(500)}"
+
+           }
+
+            env.GW_ACCESS_TOKEN = json.access_token as String
+
+            echo "Guidewire access_token acquired"
+
+        }
+
+        }
+
+      }
+
+    }
+ 
+    /* ============================
+
+       Parse Jira Parameters
+
+    ============================ */
+
+    stage('Parse Jira Parameters') {
+
+      steps {
+
+        script {
+
+          def issueKey = params.ISSUE_KEY?.trim()
+
+          def envName  = params.TARGET_ENV?.trim()
+
+          def rawDate  = params.DEPLOY_DATETIME?.trim()
+
+          def starSystem  = params.STAR_SYSTEM?.trim()
+
+          def branch = params.BRANCH?.trim()
+
+          def application = params.RAW
+ 
+          echo """
+
+Issue Key  : ${issueKey}
+
+Environment: ${envName}
+
+Deploy Time: ${rawDate}
+
+starSystem: ${starSystem}
+
+branch: ${branch}
+
+application:${application}
+
+"""
+ 
+          if (!issueKey || !envName || !rawDate) {
+
+            error "❌ Missing required Jira parameters"
+
+          }
+ 
+          env.ISSUE_KEY  = issueKey
+
+          env.TARGET_ENV = envName
+
+          env.RAW_DATE   = rawDate
+
+		  env.STAR = starSystem
+
+          def branches = httpRequest(
+
+            url: "https://gcc.api.omega2-andromeda.guidewire.net/api/v1/tenants/${TENANT}/starsystems/${env.STAR}/pla…,
+
+            httpMode: 'GET',
+
+            customHeaders: [
+
+                [name: 'Authorization', value: "Bearer ${env.GW_ACCESS_TOKEN}"],
+
+                [name: 'Content-Type',  value: 'application/json']
+
+            ],
+
+            validResponseCodes: '200',
+
+            consoleLogResponseBody: false
+
+        )
+
+        def json = readJSON text: branches.content
+
+        boolean exists = json.any { it.name == branch }
+
+        if (exists) {
+
+        echo "✅  Branch ${branch} exists"
+
+        } else {
+
+        error "❌  Given Branch name ${branch} does not exists"
+
+        }
+
+        }
+
+      }
+
+    }
+ 
+ 
+    stage('Getting latest builds') {
+
+    steps {
+
+      script {
+
+          def planetStatus = httpRequest(
+
+            url: "https://gcc.api.omega2-andromeda.guidewire.net/api/v1/tenants/${TENANT}/starsystems/${env.STAR}/pla…,
+
+            httpMode: 'GET',
+
+            customHeaders: [
+
+                [name: 'Authorization', value: "Bearer ${env.GW_ACCESS_TOKEN}"],
+
+                [name: 'Content-Type',  value: 'application/json']
+
+            ],
+
+            validResponseCodes: '200',
+
+            consoleLogResponseBody: false
+
+        )
+
+       // def response = new groovy.json.JsonSlurper().parseText(planetStatus.content)
+
+       def response = readJSON text: planetStatus.content
+
+        def phase = response.phase
+
+        def operationInProgress = response.operationInProgress
+
+        if( operationInProgress || phase != 'DEPLOYED' && phase != 'UPGRADED'){
+
+            jiraComment("${params.TARGET_ENV} is ${phase}, unable to proceed further")
+
+            error "${params.TARGET_ENV} is ${phase}, unable to proceed further"
+
+			}
+
+      }
+
+      script {
+
+	  def apiResponse = httpRequest(
+
+      url: "https://gcc.api.omega2-andromeda.guidewire.net/api/v1/tenants/${TENANT}/starsystems/${params.STAR_S…, 'UTF-8')}",
+
+      httpMode: 'GET',
+
+      customHeaders: [
+
+        [name: 'Authorization', value: "Bearer ${env.GW_ACCESS_TOKEN}"],
+
+        [name: 'Content-Type',  value: 'application/json']
+
+      ],
+
+      validResponseCodes: '200',
+
+      consoleLogResponseBody: false
+
+    )
+ 
